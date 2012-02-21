@@ -97,8 +97,14 @@ elif sys.platform == 'win32':
                 )                            
         ]
 else:  
-    print("Your platform {0} isn't supported".format(sys.platform)) 
-    sys.exit(1) 
+    #print("Your platform {0} isn't supported".format(sys.platform)) 
+    #sys.exit(1) 
+    from setuptools import os, setup, find_packages
+    packages = find_packages('.')
+    dataFiles = [        
+        ('config',['arelle/config/' + f for f in os.listdir('arelle/config')]),
+        ]
+    cx_FreezeExecutables = None
 
 setup(name='Arelle',
       version='0.9.0',

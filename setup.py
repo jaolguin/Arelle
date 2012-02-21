@@ -85,9 +85,6 @@ elif sys.platform == 'linux2': # works on ubuntu with hand-built cx_Freeze
         "includes": ['lxml', 'lxml.etree', 'lxml._elementpath'], 
         "packages": packages, 
         } ) 
-
-    if sys.version_info[0] < 3:
-        import 3to2
     
     
 elif sys.platform == 'win32':

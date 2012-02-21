@@ -19,8 +19,7 @@ if sys.version_info[0] < 3:
 class build_py27(_build_py):
     def __init__(self, *args, **kwargs):
         _build_py.__init__(self, *args, **kwargs)
-        from lib2to3 import refactor
-        import lib3to2.fixers
+        from lib2to3 import refactor        
         self.rtool = refactor.RefactoringTool(
             refactor.get_fixers_from_package('lib3to2.fixes')
             )

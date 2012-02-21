@@ -43,7 +43,19 @@ if sys.platform == 'darwin':
     cx_FreezeExecutables = None
 elif sys.platform == 'linux2': # works on ubuntu with hand-built cx_Freeze
     from setuptools import find_packages 
-    from cx_Freeze import setup, Executable  
+    try:
+        from cx_Freeze import setup, Executable  
+        cx_FreezeExecutables = [ 
+            Executable( 
+                script="arelleGUI.pyw", 
+                ), 
+            Executable( 
+                script="arelleCmdLine.py", 
+                )                             
+            ] 
+    except:
+        from setuptools import setup
+        
     packages = find_packages('.') 
     dataFiles = None 
     options = dict( build_exe =  { 
@@ -57,14 +69,7 @@ elif sys.platform == 'linux2': # works on ubuntu with hand-built cx_Freeze
         "packages": packages, 
         } ) 
     
-    cx_FreezeExecutables = [ 
-        Executable( 
-                script="arelleGUI.pyw", 
-                ), 
-        Executable( 
-                script="arelleCmdLine.py", 
-                )                             
-        ] 
+    
 elif sys.platform == 'win32':
     from setuptools import find_packages
     from cx_Freeze import setup, Executable 

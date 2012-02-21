@@ -55,6 +55,7 @@ elif sys.platform == 'linux2': # works on ubuntu with hand-built cx_Freeze
             ] 
     except:
         from setuptools import setup
+        cx_FreezeExecutables = None
         
     packages = find_packages('.') 
     dataFiles = None 

@@ -37,6 +37,8 @@ class build_py27(_build_py):
             with open(source, 'rt') as input:
                 nval = self.rtool.refactor_string(input.read(), source)
             with open(target, 'wt') as output:
+                output.write(
+                    'from __future__ import print_function\n')
                 output.write(str(nval))
 
         

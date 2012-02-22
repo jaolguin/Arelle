@@ -23,6 +23,13 @@ class build_py27(_build_py):
         self.rtool = refactor.RefactoringTool(
             refactor.get_fixers_from_package('lib3to2.fixes')
             )
+    
+    def copy_file(self, source, target, preserve_mode=True):
+        if source.endswith('.py'):
+            with open(source, 'rt') as input:
+                nval = self.rtool.refactor_string(input.read(), source)
+            with open(target, 'wt') as output:
+                output.write(str(nval))
 
         
 if sys.platform == 'darwin':
@@ -56,6 +63,7 @@ if sys.platform == 'darwin':
         dataFiles.append((dir[7:],
                           [dir + "/" + f for f in files]))
     cx_FreezeExecutables = None
+
 elif sys.platform == 'linux2': # works on ubuntu with hand-built cx_Freeze
     from setuptools import find_packages 
     try:

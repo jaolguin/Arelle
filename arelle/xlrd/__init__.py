@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright © 2005-2009 Stephen John Machin, Lingfo Pty Ltd
+# Copyright (c) 2005-2009 Stephen John Machin, Lingfo Pty Ltd
 # This module is part of the xlrd3 package, which is released under a
 # BSD-style licence.
 #

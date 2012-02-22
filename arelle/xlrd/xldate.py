@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # No part of the content of this file was derived from the works of David Giffin.
 #
-# Copyright © 2005-2008 Stephen John Machin, Lingfo Pty Ltd
+# Copyright (c) 2005-2008 Stephen John Machin, Lingfo Pty Ltd
 # This module is part of the xlrd3 package, which is released under a
 # BSD-style licence.
 #

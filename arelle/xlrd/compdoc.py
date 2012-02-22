@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Implements the minimal functionality required
 # to extract a "Workbook" or "Book" stream (as one big string)
 # from an OLE2 Compound Document file.

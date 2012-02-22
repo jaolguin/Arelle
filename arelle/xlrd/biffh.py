@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Support module for the xlrd3 package.
 #
 # Portions copyright (c) 2005-2008 Stephen John Machin, Lingfo Pty Ltd

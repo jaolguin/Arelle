@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Module for formatting information.
 #
 # Copyright © 2005-2008 Stephen John Machin, Lingfo Pty Ltd

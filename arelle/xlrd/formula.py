@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Module for parsing/evaluating Microsoft Excel formulas.
 #
 # Copyright © 2005-2009 Stephen John Machin, Lingfo Pty Ltd

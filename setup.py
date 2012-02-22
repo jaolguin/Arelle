@@ -25,7 +25,11 @@ class build_py27(_build_py):
         from lib2to3 import refactor
         import lib3to2.main
         self.rtool = lib3to2.main.StdoutRefactoringTool(
-            refactor.get_fixers_from_package('lib3to2.fixes')
+            refactor.get_fixers_from_package('lib3to2.fixes'),
+            None,
+            [],
+            False,
+            False
             )
     
     def copy_file(self, source, target, preserve_mode=True):

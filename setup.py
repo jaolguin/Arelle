@@ -15,12 +15,16 @@ from distutils.command.build_py import build_py as _build_py
 if sys.version_info[0] < 3:
     setup_requires.append('3to2')
 
+
+
+
 # If under python 2.7, run refactorings from lib3to2
 class build_py27(_build_py):
     def __init__(self, *args, **kwargs):
         _build_py.__init__(self, *args, **kwargs)
-        from lib2to3 import refactor        
-        self.rtool = refactor.RefactoringTool(
+        from lib2to3 import refactor
+        import lib3to2.main
+        self.rtool = lib3to2.main.StdoutRefactoringTool(
             refactor.get_fixers_from_package('lib3to2.fixes')
             )
     

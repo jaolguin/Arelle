@@ -74,7 +74,7 @@ if sys.platform == 'darwin':
         dir = dir.replace('\\','/')
         dataFiles.append((dir[7:],
                           [dir + "/" + f for f in files]))
-    cx_FreezeExecutables = None
+    cx_FreezeExecutables = []
 
 elif sys.platform == 'linux2': # works on ubuntu with hand-built cx_Freeze
     from setuptools import find_packages 
@@ -90,7 +90,7 @@ elif sys.platform == 'linux2': # works on ubuntu with hand-built cx_Freeze
             ] 
     except:
         from setuptools import setup
-        cx_FreezeExecutables = None
+        cx_FreezeExecutables = []
 
     packages = find_packages('.') 
     dataFiles = None 
@@ -149,7 +149,7 @@ else:
     dataFiles = [        
         ('config',['arelle/config/' + f for f in os.listdir('arelle/config')]),
         ]
-    cx_FreezeExecutables = None
+    cx_FreezeExecutables = []
 
 setup(name='Arelle',
       version='0.9.0',

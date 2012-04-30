@@ -9,23 +9,48 @@ import sys, os
 setup_requires = []
 options = {}
 scripts = []
+cxFreezeExecutables = []
+cmdclass = {}
 
 from distutils.command.build_py import build_py as _build_py
 
-if sys.version_info[0] < 3:
-    setup_requires.append('3to2')
+# Files that should not be passed through 3to2 conversion
+# in python 2.7 builds
+build_py27_unmodified = [
+    'arelle/webserver/bottle.py',
+    'arelle/PythonUtil.py'
+    ]
+# Files that should be excluded from python 2.7 builds
+build_py27_excluded = [
+    'arelle/CntlrQuickBooks.py',
+    'arelle/CntlrWinMain.py',
+    'arelle/CntlrWinTooltip.py',
+    'arelle/Dialog*.py',
+    'arelle/UiUtil.py',
+    'arelle/ViewWin*.py',
+    'arelle/WatchRss.py'
+    ]
 
+def match_patterns(path, pattern_list=[]):
+    from fnmatch import fnmatch
+    for pattern in pattern_list:
+        if fnmatch(path, pattern):
+            return True
+    return False
 
-
-
-# If under python 2.7, run refactorings from lib3to2
+# When building under python 2.7, run refactorings from lib3to2
 class build_py27(_build_py):
     def __init__(self, *args, **kwargs):
         _build_py.__init__(self, *args, **kwargs)
+        import logging
         from lib2to3 import refactor
         import lib3to2.main
+        rt_logger = logging.getLogger("RefactoringTool")
+        rt_logger.addHandler(logging.StreamHandler())
+        fixers = refactor.get_fixers_from_package('lib3to2.fixes')
+        fixers.remove('lib3to2.fixes.fix_print')
         self.rtool = lib3to2.main.StdoutRefactoringTool(
-            refactor.get_fixers_from_package('lib3to2.fixes'),
+            fixers,
             None,
             [],
             False,
@@ -33,13 +58,41 @@ class build_py27(_build_py):
             )
     
     def copy_file(self, source, target, preserve_mode=True):
-        if source.endswith('.py'):
-            with open(source, 'rt') as input:
-                nval = self.rtool.refactor_string(input.read(), source)
-            with open(target, 'wt') as output:
-                output.write(
-                    'from __future__ import print_function\n')
-                output.write(str(nval))
+
+        if match_patterns(source, build_py27_unmodified):
+            _build_py.copy_file(self, source, target, preserve_mode)
+        elif match_patterns(source, build_py27_excluded):
+            print("excluding: %s" % source)
+        elif source.endswith('.py'):
+            try:
+                print("3to2 converting: %s => %s" % (source, target))
+                with open(source, 'rt') as input:
+                    nval = self.rtool.refactor_string(input.read(), source)
+                if nval is not None:
+                    with open(target, 'wt') as output:
+                        output.write('from __future__ import print_function\n')
+                        output.write(str(nval))
+                else:
+                    raise(Exception("Failed to parse: %s" % source))
+            except Exception as e:
+                print("3to2 error (%s => %s): %s" % (source,target,e))
+
+setup_requires.append('sphinx')
+# Under python2.7, run build before running build_sphinx
+import sphinx.setup_command
+class build_sphinx_py27(sphinx.setup_command.BuildDoc):
+    def run(self):
+        self.run_command('build_py')
+        # Ensure sphinx looks at the "built" arelle libs that
+        # have passed through the 3to2 refactorings
+        # in `build_py27`
+        sys.path.insert(0, os.path.abspath("./build/lib"))
+        sphinx.setup_command.BuildDoc.run(self)
+                
+if sys.version_info[0] < 3:
+    setup_requires.append('3to2')
+    cmdclass['build_py'] = build_py27
+    cmdclass['build_sphinx'] = build_sphinx_py27
 
         
 if sys.platform == 'darwin':
@@ -159,7 +212,7 @@ setup(name='Arelle',
       author_email='support@arelle.org',
       url='http://www.arelle.org',
       download_url='http://www.arelle.org/download',
-      cmdclass={'build_py': build_py27} if sys.version_info[0] < 3 else {},
+      cmdclass=cmdclass,
       include_package_data = True,   # note: this uses MANIFEST.in
       packages=packages,
       data_files=dataFiles,

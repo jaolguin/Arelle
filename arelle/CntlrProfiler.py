@@ -1,9 +1,10 @@
 
-import Cntlr, ModelManager, FileSource, time
+from arelle import Cntlr, ModelManager, FileSource
 from optparse import OptionParser
 import cProfile
 import gettext
 import locale
+import time
 
 def main():
     CntlrProfiler().run()

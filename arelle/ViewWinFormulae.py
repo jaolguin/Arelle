@@ -7,7 +7,7 @@ Created on Dec 6, 2010
 from collections import defaultdict
 import os
 from arelle import ViewWinTree, ModelObject, XbrlConst
-from arelle.ModelFormulaObject import ModelVariable
+from arelle.ModelFormulaObject import ModelVariable, ModelVariableSetAssertion, ModelConsistencyAssertion
 from arelle.ViewUtilFormulae import rootFormulaObjects, formulaObjSortKey
 
 def viewFormulae(modelXbrl, tabWin):
@@ -55,8 +55,7 @@ class ViewFormulae(ViewWinTree.ViewTree):
 
         # pop up menu
         menu = self.contextMenu()
-        menu.add_cascade(label=_("Expand"), underline=0, command=self.expand)
-        menu.add_cascade(label=_("Collapse"), underline=0, command=self.collapse)
+        self.menuAddExpandCollapse()
         self.menuAddClipboard()
 
     def viewFormulaObjects(self, parentNode, fromObject, fromRel, n, visited):
@@ -64,6 +63,8 @@ class ViewFormulae(ViewWinTree.ViewTree):
             return
         if isinstance(fromObject, ModelVariable) and fromRel is not None:
             text = "{0} ${1}".format(fromObject.localName, fromRel.variableQname)
+        elif isinstance(fromObject, (ModelVariableSetAssertion, ModelConsistencyAssertion)):
+            text = "{0} {1}".format(fromObject.localName, fromObject.id)
         else:
             text = fromObject.localName
         childnode = self.treeView.insert(parentNode, "end", fromObject.objectId(self.id), text=text, tags=("odd" if n & 1 else "even",))
@@ -78,15 +79,16 @@ class ViewFormulae(ViewWinTree.ViewTree):
         self.id += 1
         if fromObject not in visited:
             visited.add(fromObject)
-            relationshipArcsShown = set()
-            for relationshipSet in (self.varSetFilterRelationshipSet,
-                                    self.allFormulaRelationshipsSet):
+            relationshipArcsShown = set()  # don't show group filters twice (in allFormulaRelSet secondly
+            for i, relationshipSet in enumerate((self.varSetFilterRelationshipSet,
+                                                 self.allFormulaRelationshipsSet)):
                 for modelRel in relationshipSet.fromModelObject(fromObject):
-                    if modelRel.arcElement not in relationshipArcsShown:
-                        relationshipArcsShown.add(modelRel.arcElement)
+                    if i == 0 or modelRel.arcElement not in relationshipArcsShown:
                         toObject = modelRel.toModelObject
                         n += 1 # child has opposite row style of parent
                         self.viewFormulaObjects(childnode, toObject, modelRel, n, visited)
+                        if i == 0:
+                            relationshipArcsShown.add(modelRel.arcElement)
             visited.remove(fromObject)
             
     def treeviewEnter(self, *args):

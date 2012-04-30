@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Portions copyright (c) 2005-2009 Stephen John Machin, Lingfo Pty Ltd
 # This module is part of the xlrd3 package, which is released under a
 # BSD-style licence.
@@ -12,6 +11,7 @@
 # 2007-04-22 SJM Remove experimental "trimming" facility.
 
 #for debugging only
+from __future__ import print_function
 from math import isnan
 
 import time

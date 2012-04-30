@@ -60,12 +60,12 @@ aspectModelAspect = {   # aspect of the model that corresponds to retrievable as
     }
 
 aspectModels = {
-     "dimensional": {
-             Aspect.LOCATION, Aspect.CONCEPT, Aspect.ENTITY_IDENTIFIER, Aspect.PERIOD, Aspect.UNIT,
+     "dimensional": {  # order by likelyhood of short circuting aspect match tests
+             Aspect.CONCEPT, Aspect.PERIOD, Aspect.UNIT, Aspect.LOCATION, Aspect.ENTITY_IDENTIFIER,
              Aspect.DIMENSIONS,
              Aspect.NON_XDT_SEGMENT, Aspect.NON_XDT_SCENARIO},
      "non-dimensional": {
-             Aspect.LOCATION, Aspect.CONCEPT, Aspect.ENTITY_IDENTIFIER, Aspect.PERIOD, Aspect.UNIT,
+             Aspect.CONCEPT, Aspect.PERIOD, Aspect.UNIT, Aspect.LOCATION, Aspect.ENTITY_IDENTIFIER,
              Aspect.COMPLETE_SEGMENT, Aspect.COMPLETE_SCENARIO},
      }
 
@@ -137,6 +137,10 @@ class FormulaOptions():
         self.traceVariableExpressionResult = True
         if isinstance(savedValues, dict):
             self.__dict__.update(savedValues)
+            
+    def typedParameters(self):
+        return dict((qname(paramName), paramValue)
+                    for paramName, paramValue in self.parameterValues.items())
         
         # Note: if adding to this list keep DialogFormulaParameters in sync
     def traceSource(self, traceType):
@@ -234,7 +238,11 @@ class ModelVariableSet(ModelFormulaResource):
 
     @property
     def groupFilterRelationships(self):
-        return self.modelXbrl.relationshipSet(XbrlConst.variableSetFilter).fromModelObject(self)
+        try:
+            return self._groupFilterRelationships
+        except AttributeError:
+            self._groupFilterRelationships = self.modelXbrl.relationshipSet(XbrlConst.variableSetFilter).fromModelObject(self)
+            return self._groupFilterRelationships
         
     @property
     def propertyView(self):
@@ -257,6 +265,7 @@ class ModelFormula(ModelVariableSet):
             self.hasDecimals = False
             self.aspectValues = defaultdict(list)
             self.aspectProgs = defaultdict(list)
+            self.typedDimProgAspects = set()
             exprs = []
             for ruleElt in self.iterdescendants():
                 if isinstance(ruleElt,ModelObject):
@@ -276,6 +285,10 @@ class ModelFormula(ModelVariableSet):
                         self.aspectValues[Aspect.OMIT_DIMENSIONS].append(qname(ruleElt.getparent(), ruleElt.getparent().get("dimension")))
                     elif name == "value" and ruleElt.getparent().get("dimension") is not None:
                         self.aspectValues[qname(ruleElt.getparent(), ruleElt.getparent().get("dimension"))] = XmlUtil.child(ruleElt,'*','*')
+                    elif name == "xpath" and ruleElt.getparent().get("dimension") is not None:
+                        typedDimQname = qname(ruleElt.getparent(), ruleElt.getparent().get("dimension"))
+                        self.typedDimProgAspects.add(typedDimQname)
+                        exprs = [(typedDimQname, XmlUtil.text(ruleElt))]
                     elif name == "entityIdentifier":
                         if ruleElt.get("scheme") is not None:
                             exprs.append((Aspect.SCHEME, ruleElt.get("scheme")))
@@ -322,7 +335,7 @@ class ModelFormula(ModelVariableSet):
                     elif name in ("explicitDimension", "typedDimension") and ruleElt.get("dimension") is not None:
                         qnDim = qname(ruleElt, ruleElt.get("dimension"))
                         self.aspectValues[Aspect.DIMENSIONS].append(qnDim)
-                        if not XmlUtil.hasChild(ruleElt, XbrlConst.formula, ("omit","member","value")):
+                        if not XmlUtil.hasChild(ruleElt, XbrlConst.formula, ("omit","member","value","xpath")):
                             self.aspectValues[qnDim] = XbrlConst.qnFormulaDimensionSAV
                     elif name == "precision":
                         exprs = [(Aspect.PRECISION, XmlUtil.text(ruleElt))]
@@ -359,8 +372,10 @@ class ModelFormula(ModelVariableSet):
             type = 'xs:QName'
         elif aspect == Aspect.ENTITY_IDENTIFIER:
             type = 'xs:string'
-        elif aspect in (Aspect.INSTANT, Aspect.START, Aspect.END):
-            type = 'xs:XBRLI_DATEUNION'
+        elif aspect == Aspect.START:
+            type = 'xs:DATETIME_START'
+        elif aspect in (Aspect.INSTANT, Aspect.END):
+            type = 'xs:DATETIME_INSTANT_END'
         elif aspect in (Aspect.DECIMALS, Aspect.PRECISION):
             type = 'xs:float'
         else:
@@ -369,7 +384,10 @@ class ModelFormula(ModelVariableSet):
             return [xpCtx.evaluateAtomicValue(prog, type) for prog in self.aspectProgs[aspect]]
         elif xpCtx: # return single result
             for prog in self.aspectProgs[aspect]:
-                return xpCtx.evaluateAtomicValue(prog, type)
+                if aspect in self.typedDimProgAspects:  # typed dim xpath (only), returns a node
+                    return xpCtx.flattenSequence(xpCtx.evaluate(prog, xpCtx.inputXbrlInstance.xmlRootElement))
+                else:  # atomic results
+                    return xpCtx.evaluateAtomicValue(prog, type, xpCtx.inputXbrlInstance.xmlRootElement)
         return None
                 
     def hasRule(self, aspect):
@@ -402,9 +420,9 @@ class ModelFormula(ModelVariableSet):
             eltName, ns, attrName, attrValue = aspectElementNameAttrValue[aspect]
             return XmlUtil.descendants(self, ns, eltName, attrName, attrValue)
         elif isinstance(aspect,QName):
-            return XmlUtil.descendants(self, XbrlConst.formula, 
-                                      ("explicitDimension", "typedDimension"), 
-                                      "dimension", aspect)
+            return [d 
+                    for d in XmlUtil.descendants(self, XbrlConst.formula, ("explicitDimension", "typedDimension"))
+                    if aspect == qname(d, d.get("dimension"))]
         return []
         
     @property
@@ -658,7 +676,17 @@ class ModelFactVariable(ModelVariable):
     
     @property
     def filterRelationships(self):
-        return self.modelXbrl.relationshipSet(XbrlConst.variableFilter).fromModelObject(self)
+        try:
+            return self._filterRelationships
+        except AttributeError:
+            rels = [] # order so conceptName filter is first (if any) (may want more sorting in future)
+            for rel in self.modelXbrl.relationshipSet(XbrlConst.variableFilter).fromModelObject(self):
+                if isinstance(rel.toModelObject,ModelConceptName):
+                    rels.insert(0, rel)  # put conceptName filters first
+                else:
+                    rels.append(rel)
+            self._filterRelationships = rels
+            return rels
     
     @property
     def propertyView(self):
@@ -747,6 +775,21 @@ class ModelFilter(ModelFormulaResource):
         
     def filter(self, xpCtx, varBinding, facts, cmplmt):
         return facts
+
+    def hasNoFilterVariableDependencies(self, xpCtx):
+        try:
+            return self._hasNoVariableDependencies
+        except AttributeError:
+            self._hasNoVariableDependencies = len(self.variableRefs() - xpCtx.parameterQnames) == 0
+            return self._hasNoVariableDependencies
+        
+    @property
+    def isFilterShared(self):
+        try:
+            return self._isFilterShared
+        except AttributeError:
+            self._isFilterShared = len(self.modelXbrl.relationshipSet("XBRL-formulae").toModelObject(self)) > 1
+            return self._isFilterShared
     
     @property
     def propertyView(self):
@@ -860,6 +903,7 @@ class ModelAspectCover(ModelFilter):
         
     def dimAspectsCovered(self, varBinding):
         # if DIMENSIONS are provided then return all varBinding's dimensions less excluded dimensions
+        self.aspectsCovered  # must have aspectsCovered initialized before the rest of this method
         dimsCovered = set()
         if self.allDimensions:
             for varBoundAspect in varBinding.aspectsDefined:
@@ -898,27 +942,35 @@ class ModelBooleanFilter(ModelFilter):
     def filterRelationships(self):
         return self.modelXbrl.relationshipSet(XbrlConst.booleanFilter).fromModelObject(self)
     
+    def aspectsCovered(self, varBinding):
+        aspectsCovered = set()
+        for rel in self.filterRelationships:
+            if rel.isCovered:
+                _filter = rel.toModelObject
+                aspectsCovered |= _filter.aspectsCovered(varBinding)
+        return aspectsCovered
+        
 class ModelAndFilter(ModelBooleanFilter):
     def init(self, modelDocument):
         super(ModelAndFilter, self).init(modelDocument)
 
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        from arelle.FormulaEvaluator import filterFacts
         if self.filterRelationships:
-            return filterFacts(xpCtx, varBinding, facts, self.filterRelationships, "and")
+            andedFacts = filterFacts(xpCtx, varBinding, facts, self.filterRelationships, "and")
         else:
-            return []
+            andedFacts = set()
+        return (facts - andedFacts) if cmplmt else andedFacts
         
 class ModelOrFilter(ModelBooleanFilter):
     def init(self, modelDocument):
         super(ModelOrFilter, self).init(modelDocument)
 
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        from arelle.FormulaEvaluator import filterFacts
         if self.filterRelationships:
-            return filterFacts(xpCtx, varBinding, facts, self.filterRelationships, "or")
+            oredFacts = filterFacts(xpCtx, varBinding, facts, self.filterRelationships, "or")
         else:
-            return []
+            oredFacts = set()
+        return (facts - oredFacts) if cmplmt else oredFacts
 
 class ModelConceptName(ModelFilter):
     def init(self, modelDocument):
@@ -962,8 +1014,13 @@ class ModelConceptName(ModelFilter):
             return set()
     
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.qname in self.conceptQnames | self.evalQnames(xpCtx,fact))] 
+        if not self.qnameExpressionProgs: # optimize if simple
+            qnamedFacts = set.union(*[inst.factsByQname[qn]
+                                      for inst in varBinding.instances
+                                      for qn in self.conceptQnames])
+            return (facts - qnamedFacts) if cmplmt else (facts & qnamedFacts)            
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.qname in self.conceptQnames | self.evalQnames(xpCtx,fact))) 
     
     @property
     def propertyView(self):
@@ -989,9 +1046,10 @@ class ModelConceptPeriodType(ModelFilter):
         return self.get("periodType")
     
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.concept.periodType == self.periodType)] 
-    
+        factsOfPeriodType = set.union(*[inst.factsByPeriodType(self.periodType)
+                                        for inst in varBinding.instances])
+        return (facts - factsOfPeriodType) if cmplmt else (facts & factsOfPeriodType)
+        
     @property
     def propertyView(self):
         return (("label", self.xlinkLabel),
@@ -1016,8 +1074,8 @@ class ModelConceptBalance(ModelFilter):
         return self.get("balance")
     
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ ((fact.concept.balance == self.balance) if fact.concept.balance else (self.balance == "none"))] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ ((fact.concept.balance == self.balance) if fact.concept.balance else (self.balance == "none"))) 
        
     @property
     def propertyView(self):
@@ -1087,13 +1145,13 @@ class ModelConceptCustomAttribute(ModelConceptFilterWithQnameExpression):
             return None
         
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                for qn in (self.evalQname(xpCtx,fact),)
-                for v in (self.evalValue(xpCtx,fact),)
-                for c in (fact.concept,)
-                if cmplmt ^ (qn is not None and
-                             c.get(qn.clarkNotation) is not None and
-                             (v is None or v == typedValue(xpCtx.modelXbrl, c, attrQname=qn)))] 
+        return set(fact for fact in facts 
+                   for qn in (self.evalQname(xpCtx,fact),)
+                   for v in (self.evalValue(xpCtx,fact),)
+                   for c in (fact.concept,)
+                   if cmplmt ^ (qn is not None and
+                                c.get(qn.clarkNotation) is not None and
+                                (v is None or v == typedValue(xpCtx.modelXbrl, c, attrQname=qn)))) 
 
     @property
     def propertyView(self):
@@ -1120,10 +1178,14 @@ class ModelConceptDataType(ModelConceptFilterWithQnameExpression):
        
     def filter(self, xpCtx, varBinding, facts, cmplmt):
         notStrict = self.strict != "true"
-        return [fact for fact in facts 
-                for qn in (self.evalQname(xpCtx,fact),)
-                for c in (fact.concept,)
-                if cmplmt ^ (c.typeQname == qn or (notStrict and c.type.isDerivedFrom(qn)))] 
+        if self.filterQname: # optimize if simple without a formula
+            factsOfType = set.union(*[inst.factsByDatatype(notStrict, self.filterQname)
+                                      for inst in varBinding.instances])
+            return (facts - factsOfType) if cmplmt else (facts & factsOfType)            
+        return set(fact for fact in facts 
+                   for qn in (self.evalQname(xpCtx,fact),)
+                   for c in (fact.concept,)
+                   if cmplmt ^ (c.typeQname == qn or (notStrict and c.type.isDerivedFrom(qn))))
 
     @property
     def propertyView(self):
@@ -1150,10 +1212,10 @@ class ModelConceptSubstitutionGroup(ModelConceptFilterWithQnameExpression):
     
     def filter(self, xpCtx, varBinding, facts, cmplmt):
         if self.strict == "true":
-            return [fact for fact in facts 
-                    if cmplmt ^ (fact.concept.substitutionGroupQname == self.evalQname(xpCtx,fact))] 
-        return [fact for fact in facts 
-                if cmplmt ^ fact.concept.substitutesForQname(self.evalQname(xpCtx,fact))]
+            return set(fact for fact in facts 
+                       if cmplmt ^ (fact.concept.substitutionGroupQname == self.evalQname(xpCtx,fact)))
+        return set(fact for fact in facts 
+                   if cmplmt ^ fact.concept.substitutesForQname(self.evalQname(xpCtx,fact)))
     
     @property
     def propertyView(self):
@@ -1324,7 +1386,7 @@ class ModelConceptRelation(ModelFilter):
         else:
             sourceQname = self.evalSourceQname(xpCtx, None)
         if not sourceQname:
-            return []
+            return set()
         linkrole = self.evalLinkrole(xpCtx, None)
         linkQname = self.evalLinkQname(xpCtx, None)
         if linkQname is None: linkQname = ()
@@ -1334,7 +1396,6 @@ class ModelConceptRelation(ModelFilter):
         hasNoTest = self.test is None
         axis = self.axis
         isFromAxis = axis.startswith('parent') or axis.startswith('ancestor')
-        from arelle.FunctionXfi import concept_relationships
         relationships = concept_relationships(xpCtx, None, (sourceQname,
                                                             linkrole,
                                                             arcrole,
@@ -1342,7 +1403,7 @@ class ModelConceptRelation(ModelFilter):
                                                             self.generations,
                                                             linkQname,
                                                             arcQname))
-        outFacts = []
+        outFacts = set()
         for fact in facts:
             factOk = False
             factQname = fact.qname
@@ -1369,7 +1430,7 @@ class ModelConceptRelation(ModelFilter):
                     if factQname == sourceQname:
                         factOk = True
             if cmplmt ^ (factOk):
-                outFacts.append(fact)
+                outFacts.add(fact)
         return outFacts 
     
     def viewExpression(self):
@@ -1380,10 +1441,10 @@ class ModelEntityIdentifier(ModelTestFilter):
         super(ModelEntityIdentifier, self).init(modelDocument)
 
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.isItem and
-                             self.evalTest(xpCtx, 
-                                           XmlUtil.child(fact.context.entity, XbrlConst.xbrli, "identifier")))] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.isItem and
+                                self.evalTest(xpCtx, 
+                                              fact.context.entityIdentifierElement)))
     
     def aspectsCovered(self, varBinding):
         return {Aspect.ENTITY_IDENTIFIER}
@@ -1410,10 +1471,10 @@ class ModelEntitySpecificIdentifier(ModelFilter):
             super(ModelEntitySpecificIdentifier, self).compile()
         
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.isItem and ( 
-                             fact.context.entityIdentifier[0] == xpCtx.evaluateAtomicValue(self.schemeProg, 'xs:string', fact) and 
-                             fact.context.entityIdentifier[1] == xpCtx.evaluateAtomicValue(self.valueProg, 'xs:string', fact)))] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.isItem and ( 
+                                                 fact.context.entityIdentifier[0] == xpCtx.evaluateAtomicValue(self.schemeProg, 'xs:string', fact) and 
+                                                 fact.context.entityIdentifier[1] == xpCtx.evaluateAtomicValue(self.valueProg, 'xs:string', fact))))
 
     @property
     def propertyView(self):
@@ -1445,9 +1506,9 @@ class ModelEntityScheme(ModelFilter):
             super(ModelEntityScheme, self).compile()
         
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.isItem and 
-                             fact.context.entityIdentifier[0] == xpCtx.evaluateAtomicValue(self.schemeProg, 'xs:string', fact))] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.isItem and 
+                                fact.context.entityIdentifier[0] == xpCtx.evaluateAtomicValue(self.schemeProg, 'xs:string', fact))) 
 
     @property
     def propertyView(self):
@@ -1469,9 +1530,9 @@ class ModelEntityRegexpIdentifier(ModelPatternFilter):
         return {Aspect.ENTITY_IDENTIFIER}
         
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.isItem and 
-                             self.rePattern.search(fact.context.entityIdentifier[1]) is not None)] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.isItem and 
+                                self.rePattern.search(fact.context.entityIdentifierElement.xValue) is not None)) 
 
 class ModelEntityRegexpScheme(ModelPatternFilter):
     def init(self, modelDocument):
@@ -1481,17 +1542,26 @@ class ModelEntityRegexpScheme(ModelPatternFilter):
         return {Aspect.ENTITY_IDENTIFIER}
         
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.isItem and 
-                             self.rePattern.search(fact.context.entityIdentifier[0]) is not None)] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.isItem and 
+                                self.rePattern.search(fact.context.entityIdentifier[0]) is not None)) 
 
 class ModelGeneral(ModelTestFilter):
     def init(self, modelDocument):
         super(ModelGeneral, self).init(modelDocument)
 
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (self.evalTest(xpCtx, fact))] 
+        if self.isFilterShared and self.hasNoFilterVariableDependencies(xpCtx): # cache this filter by fact
+            if self in xpCtx.cachedFilterResults:
+                qualifyingFacts = xpCtx.cachedFilterResults[self]
+            else:
+                xpCtx.cachedFilterResults[self] = qualifyingFacts = set(fact 
+                                                                        for inst in varBinding.instances 
+                                                                        for fact in inst.factsInInstance
+                                                                        if self.evalTest(xpCtx, fact))
+            return (facts - qualifyingFacts) if cmplmt else (facts & qualifyingFacts)            
+        return set(fact for fact in facts 
+                   if cmplmt ^ (self.evalTest(xpCtx, fact))) 
     
     
 class ModelMatchFilter(ModelFilter):
@@ -1534,7 +1604,6 @@ class ModelMatchFilter(ModelFilter):
         return super(ModelMatchFilter, self).variableRefs(None, varRefSet)
 
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        from arelle.FormulaEvaluator import aspectMatches
         aspect = self.aspect
         otherFact = xpCtx.inScopeVars.get(self.variable)
         # check that otherFact is a single fact or otherwise all match for indicated aspect
@@ -1553,12 +1622,12 @@ class ModelMatchFilter(ModelFilter):
                                                       str(fact), aspectStr(aspect)))
                     return cmplmt
             if hasNonFact:
-                return []
+                return set()
             otherFact = firstFact
         if not isinstance(otherFact,ModelFact):
-            return []
-        return [fact for fact in facts 
-                if cmplmt ^ (aspectMatches(xpCtx, fact, otherFact, aspect))] 
+            return set()
+        return set(fact for fact in facts 
+                   if cmplmt ^ (aspectMatches(xpCtx, fact, otherFact, aspect))) 
 
     @property
     def propertyView(self):
@@ -1583,9 +1652,9 @@ class ModelPeriod(ModelTestFilter):
         return {Aspect.PERIOD}
         
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.isItem and 
-                             self.evalTest(xpCtx, fact.context.period))] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.isItem and 
+                                self.evalTest(xpCtx, fact.context.period))) 
     
 class ModelDateTimeFilter(ModelFilter):
     def init(self, modelDocument):
@@ -1637,9 +1706,9 @@ class ModelPeriodStart(ModelDateTimeFilter):
         super(ModelPeriodStart, self).init(modelDocument)
 
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.isItem and 
-                             fact.context.startDatetime == self.evalDatetime(xpCtx, fact, addOneDay=False))] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.isItem and 
+                                fact.context.startDatetime == self.evalDatetime(xpCtx, fact, addOneDay=False))) 
 
 class ModelPeriodEnd(ModelDateTimeFilter):
     def init(self, modelDocument):
@@ -1655,17 +1724,17 @@ class ModelPeriodInstant(ModelDateTimeFilter):
         super(ModelPeriodInstant, self).init(modelDocument)
 
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.isItem and 
-                             fact.context.instantDatetime == self.evalDatetime(xpCtx, fact, addOneDay=True))] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.isItem and 
+                                fact.context.instantDatetime == self.evalDatetime(xpCtx, fact, addOneDay=True))) 
     
 class ModelForever(ModelFilter):
     def init(self, modelDocument):
         super(ModelForever, self).init(modelDocument)
 
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.isItem and fact.context.isForeverPeriod)] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.isItem and fact.context.isForeverPeriod)) 
 
     def aspectsCovered(self, varBinding):
         return {Aspect.PERIOD}
@@ -1699,9 +1768,9 @@ class ModelInstantDuration(ModelFilter):
                 otherDatetime = otherFact.context.startDatetime
             else:
                 otherDatetime = otherFact.context.endDatetime
-            return [fact for fact in facts 
-                    if cmplmt ^ (fact.isItem and (fact.context.isInstantPeriod and \
-                                 fact.context.instantDatetime == otherDatetime))] 
+            return set(fact for fact in facts 
+                       if cmplmt ^ (fact.isItem and (fact.context.isInstantPeriod and \
+                                                     fact.context.instantDatetime == otherDatetime))) 
         return facts # couldn't filter
 
     @property
@@ -1735,10 +1804,12 @@ class ModelExplicitDimension(ModelFilter):
         
     @property
     def dimQname(self):
-        dimQname = XmlUtil.child(XmlUtil.child(self,XbrlConst.df,"dimension"), XbrlConst.df, "qname")
-        if dimQname is not None:
-            return qname( dimQname, XmlUtil.text(dimQname) )
-        return None
+        try:
+            return self._dimQname
+        except AttributeError:
+            dQn = XmlUtil.child(XmlUtil.child(self,XbrlConst.df,"dimension"), XbrlConst.df, "qname")
+            self._dimQname = qname( dQn, XmlUtil.text(dQn) ) if dQn is not None else None
+            return self._dimQname
     
     @property
     def dimQnameExpression(self):
@@ -1787,7 +1858,7 @@ class ModelExplicitDimension(ModelFilter):
             return None
     
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        outFacts = []
+        outFacts = set()
         for fact in facts:
             factOk = True
             dimQname = self.evalDimQname(xpCtx, fact)
@@ -1796,7 +1867,7 @@ class ModelExplicitDimension(ModelFilter):
                 self.modelXbrl.error("xfie:invalidExplicitDimensionQName",
                                      _("%(dimension)s is not an explicit dimension concept QName."),
                                      modelObject=self, dimension=dimQname)
-                return []
+                return set()
             if fact.isItem:
                 memQname = fact.context.dimMemberQname(dimQname)
                 if memQname:
@@ -1818,7 +1889,7 @@ class ModelExplicitDimension(ModelFilter):
                             if memConcept is None:
                                 #self.modelXbrl.error(_("{0} is not a domain item concept.").format(matchMemQname), 
                                 #                     "err", "xbrldfe:invalidDomainMember")
-                                return []
+                                return set()
                             if (not memberModel.axis or memberModel.axis.endswith('-self')) and \
                                 matchMemQname == memQname:
                                     factOk = True
@@ -1851,21 +1922,21 @@ class ModelExplicitDimension(ModelFilter):
                                 if not checkPriItemDimValueValidity(self, fact.concept, dimConcept, memConcept):
                                     self.modelXbrl.error(_("{0} is not a valid domain member for dimension {1} of primary item {2}.").format(matchMemQname, dimConcept.qname, fact.qname), 
                                                          "err", "xbrldfe:invalidDomainMember")
-                                    return []
+                                    return set()
                             '''
                         '''
                         if not factOk:
                             if not domainMembersExist and memberModel.axis:
                                 self.modelXbrl.error(_("No member found in the network of explicit dimension concept {0}").format(dimQname), 
                                                      "err", "xbrldfe:invalidDomainMember")
-                                return []
+                                return set()
                         '''
                 else: # no member for dimension
                     factOk = False
             else:
                 factOk = True # don't filter facts which are tuples
             if cmplmt ^ (factOk):
-                outFacts.append(fact)
+                outFacts.add(fact)
         return outFacts 
 
     @property
@@ -1946,7 +2017,7 @@ class ModelTypedDimension(ModelTestFilter):
             return None
     
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        outFacts = []
+        outFacts = set()
         for fact in facts:
             dimQname = self.evalDimQname(xpCtx, fact)
             dim = fact.context.qnameDims.get(dimQname)
@@ -1955,7 +2026,7 @@ class ModelTypedDimension(ModelTestFilter):
                          (not self.test or
                           # typed dimension test item is the <typedMember> element, not its contents, e.g. dim
                           self.evalTest(xpCtx, dim)))):
-                outFacts.append(fact)
+                outFacts.add(fact)
         return outFacts 
     
     @property
@@ -1980,13 +2051,18 @@ class ModelRelativeFilter(ModelFilter):
         return varBinding.aspectsDefined
 
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        from arelle.FormulaEvaluator import aspectMatchFilter
-        return aspectMatchFilter(xpCtx, 
-                                 facts, 
-                                 (varBinding.aspectsDefined - varBinding.aspectsCovered), 
-                                 xpCtx.varBindings.get(self.variable), 
-                                 "relative",
-                                 varBinding)
+        aspectsUncovered = (varBinding.aspectsDefined - varBinding.aspectsCovered)
+        otherVarBinding = xpCtx.varBindings.get(self.variable)
+        hasOtherFactVar = otherVarBinding and otherVarBinding.isFactVar and not otherVarBinding.isFallback
+        otherFact = otherVarBinding.yieldedFact if hasOtherFactVar else None
+        return set(fact for fact in facts 
+                   if cmplmt ^ (hasOtherFactVar and
+                                aspectsMatch(xpCtx, otherFact, fact, aspectsUncovered) and
+                                all(aspectMatches(xpCtx, otherFact, fact, dimAspect)
+                                    for dimAspect in fact.context.dimAspects(xpCtx.defaultDimensionAspects)
+                                    if (not varBinding.hasAspectValueCovered(dimAspect) and
+                                        not otherVarBinding.hasAspectValueCovered(dimAspect)))
+                            ))
         
     @property
     def propertyView(self):
@@ -1998,7 +2074,7 @@ class ModelRelativeFilter(ModelFilter):
     
     @property
     def viewExpression(self):
-        return self.variable
+        return "${0}".format(self.variable)
 
 class ModelSegmentFilter(ModelTestFilter):
     def init(self, modelDocument):
@@ -2008,9 +2084,9 @@ class ModelSegmentFilter(ModelTestFilter):
         return {Aspect.COMPLETE_SEGMENT}
         
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.isItem and 
-                             (fact.context.hasSegment and self.evalTest(xpCtx, fact.context.segment)))] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.isItem and 
+                                (fact.context.hasSegment and self.evalTest(xpCtx, fact.context.segment))))
     
 class ModelScenarioFilter(ModelTestFilter):
     def init(self, modelDocument):
@@ -2020,9 +2096,9 @@ class ModelScenarioFilter(ModelTestFilter):
         return {Aspect.COMPLETE_SCENARIO}
         
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.isItem and
-                             (fact.context.hasScenario and self.evalTest(xpCtx, fact.context.scenario)))] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.isItem and
+                                (fact.context.hasScenario and self.evalTest(xpCtx, fact.context.scenario))))
     
 class ModelAncestorFilter(ModelFilter):
     def init(self, modelDocument):
@@ -2063,7 +2139,7 @@ class ModelAncestorFilter(ModelFilter):
             return None
     
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts if cmplmt ^ ( self.evalQname(xpCtx,fact) in fact.ancestorQnames ) ]
+        return set(fact for fact in facts if cmplmt ^ ( self.evalQname(xpCtx,fact) in fact.ancestorQnames ))
     
     @property
     def propertyView(self):
@@ -2117,7 +2193,7 @@ class ModelParentFilter(ModelFilter):
             return None
     
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts if cmplmt ^ ( self.evalQname(xpCtx,fact) == fact.parentQname ) ]
+        return set(fact for fact in facts if cmplmt ^ ( self.evalQname(xpCtx,fact) == fact.parentQname ))
     
    
     @property
@@ -2171,8 +2247,8 @@ class ModelLocationFilter(ModelFilter):
             candidateElts = {varFacts}
         elif isinstance(varFacts,(list,tuple)):
             candidateElts = set(f for f in varFacts if isinstance(f,ModelFact)) 
-        return [fact for fact in facts 
-                if cmplmt ^ ( len(candidateElts & self.evalLocation(xpCtx,fact) ) > 0 ) ]
+        return set(fact for fact in facts 
+                   if cmplmt ^ ( len(candidateElts & self.evalLocation(xpCtx,fact) ) > 0 ))
    
     @property
     def propertyView(self):
@@ -2185,7 +2261,7 @@ class ModelLocationFilter(ModelFilter):
     
     @property
     def viewExpression(self):
-        return "{0} {1}".format(self.location, self.variable)
+        return "{0} ${1}".format(self.location, self.variable)
 
 class ModelSiblingFilter(ModelFilter):
     def init(self, modelDocument):
@@ -2206,14 +2282,14 @@ class ModelSiblingFilter(ModelFilter):
 
     def filter(self, xpCtx, varBinding, facts, cmplmt):
         otherFact = xpCtx.inScopeVars.get(self.variable)
-        if isinstance(otherFact,(list,tuple)) and len(otherFact) > 0:
-            otherFactParent = otherFact[0].parentElement
-        elif isinstance(otherFact,ModelFact):
+        while isinstance(otherFact,(list,tuple)) and len(otherFact) > 0:
+            otherFact = otherFact[0]  # dereference if in a list
+        if isinstance(otherFact,ModelFact):
             otherFactParent = otherFact.parentElement
         else:
             otherFactParent = None
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.parentElement == otherFactParent)] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.parentElement == otherFactParent))
 
     @property
     def propertyView(self):
@@ -2225,7 +2301,7 @@ class ModelSiblingFilter(ModelFilter):
     
     @property
     def viewExpression(self):
-        return self.variable
+        return "${0}".format(self.variable)
 
 class ModelGeneralMeasures(ModelTestFilter):
     def init(self, modelDocument):
@@ -2235,9 +2311,9 @@ class ModelGeneralMeasures(ModelTestFilter):
         return {Aspect.UNIT}
         
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.isItem and 
-                             (fact.isNumeric and self.evalTest(xpCtx, fact.unit)))] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.isItem and 
+                                (fact.isNumeric and self.evalTest(xpCtx, fact.unit))))
     
 class ModelSingleMeasure(ModelFilter):
     def init(self, modelDocument):
@@ -2275,10 +2351,10 @@ class ModelSingleMeasure(ModelFilter):
             return None
     
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ (fact.isNumeric and 
-                             fact.unit.isSingleMeasure and
-                             (fact.unit.measures[0][0] == self.evalQname(xpCtx,fact)))] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (fact.isNumeric and 
+                                fact.unit.isSingleMeasure and
+                                (fact.unit.measures[0][0] == self.evalQname(xpCtx,fact))))
     
     @property
     def propertyView(self):
@@ -2298,8 +2374,8 @@ class ModelNilFilter(ModelFilter):
         super(ModelNilFilter, self).init(modelDocument)
 
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        return [fact for fact in facts 
-                if cmplmt ^ fact.isNil] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ fact.isNil)
     
 class ModelPrecisionFilter(ModelFilter):
     def init(self, modelDocument):
@@ -2310,14 +2386,13 @@ class ModelPrecisionFilter(ModelFilter):
         return self.get("minimum")
     
     def filter(self, xpCtx, varBinding, facts, cmplmt):
-        from arelle.ValidateXbrlCalcs import inferredPrecision
         minimum = self.minimum
         numMinimum = float('INF') if minimum == 'INF' else _INT(minimum)
-        return [fact for fact in facts 
-                if cmplmt ^ (self.minimum != 'INF' and
-                             not fact.isNil and
-                             fact.isNumeric and not fact.isFraction and
-                             inferredPrecision(fact) >= numMinimum)] 
+        return set(fact for fact in facts 
+                   if cmplmt ^ (self.minimum != 'INF' and
+                                not fact.isNil and
+                                fact.isNumeric and not fact.isFraction and
+                                inferredPrecision(fact) >= numMinimum)) 
 
     @property
     def propertyView(self):
@@ -2381,7 +2456,7 @@ class ModelMessage(ModelFormulaResource):
     
     @property
     def viewExpression(self):
-        return self.minimum
+        return XmlUtil.text(self)
 
 class ModelCustomFunctionSignature(ModelFormulaResource):
     def init(self, modelDocument):
@@ -2470,7 +2545,7 @@ class ModelCustomFunctionImplementation(ModelFormulaResource):
             return self._outputExpression
         except AttributeError:
             outputElt = XmlUtil.child(self, XbrlConst.cfi, "output")
-            self._outputExpression = XmlUtil.text(outputElt) if outputElt else None
+            self._outputExpression = XmlUtil.text(outputElt) if outputElt is not None else None
             return self._outputExpression
     
     def compile(self):
@@ -2566,3 +2641,7 @@ elementSubstitutionModelClass.update((
      (XbrlConst.qnCustomFunctionImplementation, ModelCustomFunctionImplementation),
      ))
 
+# import after other modules resolved to prevent circular references
+from arelle.FormulaEvaluator import filterFacts, aspectsMatch, aspectMatches
+from arelle.FunctionXfi import concept_relationships
+from arelle.ValidateXbrlCalcs import inferredPrecision

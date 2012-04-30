@@ -15,8 +15,8 @@ class NewFactItemOptions():
     def __init__(self, savedOptions=None, xbrlInstance=None):
         self.entityIdentScheme = ""
         self.entityIdentValue = ""
-        self.startDate = None
-        self.endDate = None
+        self.startDate = ""  # use string  values so structure can be json-saved
+        self.endDate = ""
         self.monetaryUnit = ""
         self.monetaryDecimals = ""
         self.nonMonetaryDecimals = ""
@@ -28,10 +28,10 @@ class NewFactItemOptions():
                     cntx = fact.context
                     if not self.entityIdentScheme:
                         self.entityIdentScheme, self.entityIdentValue = cntx.entityIdentifier
-                    if self.startDate is None and cntx.isStartEndPeriod:
-                        self.startDate = cntx.startDatetime
-                    if self.startDate is None and (cntx.isStartEndPeriod or cntx.isInstantPeriod):
-                        self.endDate = cntx.endDatetime
+                    if not self.startDate and cntx.isStartEndPeriod:
+                        self.startDate = XmlUtil.dateunionValue(cntx.startDatetime)
+                    if not self.startDate and (cntx.isStartEndPeriod or cntx.isInstantPeriod):
+                        self.endDate = XmlUtil.dateunionValue(cntx.endDatetime, subtractOneDay=True)
                     if fact.isNumeric:
                         if fact.concept.isMonetary:
                             if not self.monetaryUnit and fact.unit.measures[0] and fact.unit.measures[0][0].namespaceURI == XbrlConst.iso4217:
@@ -43,6 +43,13 @@ class NewFactItemOptions():
                 if self.entityIdentScheme and self.startDate and self.monetaryUnit and self.monetaryDecimals and self.nonMonetaryDecimals:
                     break 
                 
+    @property
+    def startDateDate(self):  # return a date-typed date value
+        return XmlUtil.datetimeValue(self.startDate)
+
+    @property
+    def endDateDate(self):  # return a date-typed date
+        return XmlUtil.datetimeValue(self.endDate, addOneDay=True)
                 
     
 class ModelFact(ModelObject):
@@ -60,8 +67,11 @@ class ModelFact(ModelObject):
 
     @property
     def context(self):
-        context = self.modelXbrl.contexts.get(self.contextID)
-        return context
+        try:
+            return self._context
+        except AttributeError:
+            self._context = self.modelXbrl.contexts.get(self.contextID)
+            return self._context
     
     @property
     def unit(self):
@@ -79,7 +89,7 @@ class ModelFact(ModelObject):
             context = self.context
             unit = self.unit
             self._conceptContextUnitLangHash = hash( 
-                (self.concept.qname,
+                (self.qname,
                  context.contextDimAwareHash if context is not None else None,
                  unit.hash if unit is not None else None,
                  self.xmlLang) )
@@ -219,7 +229,7 @@ class ModelFact(ModelObject):
             return float(self.value)
         return self.value
     
-    def isVEqualTo(self, other):  # facts may be in different instances
+    def isVEqualTo(self, other, deemP0Equal=False):  # facts may be in different instances
         if self.isTuple or other.isTuple:
             return False
         if self.isNil:
@@ -236,7 +246,9 @@ class ModelFact(ModelObject):
                     d = min((inferredDecimals(self), inferredDecimals(other))); p = None
                 else:
                     d = None; p = min((inferredPrecision(self), inferredPrecision(other)))
-                return roundValue(float(self.value),precision=p,decimals=d) == roundValue(float(other.value),precision=p,decimals=d)
+                if p == 0 and deemP0Equal:
+                    return True
+                return roundValue(self.value,precision=p,decimals=d) == roundValue(other.value,precision=p,decimals=d)
             else:
                 return False
         selfValue = self.value
@@ -246,7 +258,7 @@ class ModelFact(ModelObject):
         else:
             return selfValue == otherValue
         
-    def isDuplicateOf(self, other, topLevel=True):  # facts may be in different instances
+    def isDuplicateOf(self, other, topLevel=True, deemP0Equal=False):  # facts may be in different instances
         if self.isItem:
             if (self == other or
                 self.qname != other or
@@ -266,10 +278,10 @@ class ModelFact(ModelObject):
                 if len(self.modelTupleFacts) == len(other.modelTupleFacts):
                     for child1 in self.modelTupleFacts:
                         if child1.isItem:
-                            if not any(child1.isVEqualTo(child2) for child2 in other.modelTupleFacts):
+                            if not any(child1.isVEqualTo(child2, deemP0Equal) for child2 in other.modelTupleFacts):
                                 return False
                         elif child1.isTuple:
-                            if not any(child1.isDuplicateOf( child2, topLevel=False) 
+                            if not any(child1.isDuplicateOf( child2, topLevel=False, deemP0Equal=deemP0Equal) 
                                        for child2 in other.modelTupleFacts):
                                 return False
                     return True
@@ -309,7 +321,11 @@ class ModelInlineFact(ModelFact):
         
     @property
     def qname(self):
-        return self.prefixedNameQname(self.get("name")) if self.get("name") else None
+        try:
+            return self._factQname
+        except AttributeError:
+            self._factQname = self.prefixedNameQname(self.get("name")) if self.get("name") else None
+            return self._factQname
 
     @property
     def sign(self):
@@ -339,7 +355,7 @@ class ModelInlineFact(ModelFact):
             try:
                 orderAttr = self.get("order")
                 self._order = float(orderAttr)
-            except ValueError:
+            except (ValueError, TypeError):
                 self._order = None
             return self._order
 
@@ -369,17 +385,25 @@ class ModelInlineFact(ModelFact):
     
     @property
     def value(self):
-        v = XmlUtil.innerText(self, ixExclude=True)
-        f = self.format
-        if f is not None:
-            if (f.namespaceURI.startswith("http://www.xbrl.org/inlineXBRL/transformation") and
-                f.localName in FunctionIxt.ixtFunctions):
-                v = FunctionIxt.ixtFunctions[f.localName](v)
-        if self.localName == "nonNumeric" or self.localName == "tuple":
-            return v
-        else:
-            return self.transformedValue(v)
+        try:
+            return self._ixValue
+        except AttributeError:
+            v = XmlUtil.innerText(self, ixExclude=True, strip=False)
+            f = self.format
+            if f is not None:
+                if (f.namespaceURI in FunctionIxt.ixtNamespaceURIs and
+                    f.localName in FunctionIxt.ixtFunctions):
+                    v = FunctionIxt.ixtFunctions[f.localName](v)
+            if self.localName == "nonNumeric" or self.localName == "tuple":
+                self._ixValue = v
+            else:
+                self._ixValue = self.transformedValue(v)
+            return self._ixValue
 
+    @property
+    def elementText(self):    # override xml-level elementText for transformed value text
+        return self.value
+    
     @property
     def propertyView(self):
         if self.localName == "nonFraction" or self.localName == "fraction":
@@ -487,8 +511,9 @@ class ModelContext(ModelObject):
 
     @property
     def entityIdentifier(self):
-        return (self.entityIdentifierElement.get("scheme"),
-                XmlUtil.text(self.entityIdentifierElement))
+        eiElt = self.entityIdentifierElement
+        return (eiElt.get("scheme"), eiElt.xValue)
+
     @property
     def entityIdentifierHash(self):
         try:
@@ -525,11 +550,13 @@ class ModelContext(ModelObject):
     
     # returns ModelDimensionValue for instance dimensions, else QName for defaults
     def dimValue(self, dimQname):
-        if dimQname in self.qnameDims:
+        try:
             return self.qnameDims[dimQname]
-        elif dimQname in self.modelXbrl.qnameDimensionDefaults:
-            return self.modelXbrl.qnameDimensionDefaults[dimQname]
-        return None
+        except KeyError:
+            try:
+                return self.modelXbrl.qnameDimensionDefaults[dimQname]
+            except KeyError:
+                return None
     
     def dimMemberQname(self, dimQname, includeDefaults=False):
         dimValue = self.dimValue(dimQname)
@@ -572,14 +599,29 @@ class ModelContext(ModelObject):
     def scenarioHash(self):
         # s-equality hash
         return XbrlUtil.equalityHash( self.scenario ) # self-caching
+    
+    @property
+    def nonDimSegmentHash(self):
+        try:
+            return self._nonDimSegmentHash
+        except AttributeError:
+            self._nonDimSegmentHash = XbrlUtil.equalityHash(self.nonDimValues("segment"))
+            return self._nonDimSegmentHash
+        
+    @property
+    def nonDimScenarioHash(self):
+        try:
+            return self._nonDimScenarioHash
+        except AttributeError:
+            self._nonDimScenarioHash = XbrlUtil.equalityHash(self.nonDimValues("scenario"))
+            return self._nonDimScenarioHash
         
     @property
     def nonDimHash(self):
         try:
             return self._nonDimsHash
         except AttributeError:
-            self._nonDimsHash = hash( (XbrlUtil.equalityHash(self.nonDimValues("segment")), 
-                                       XbrlUtil.equalityHash(self.nonDimValues("scenario"))) )
+            self._nonDimsHash = hash( (self.nonDimSegmentHash, self.nonDimScenarioHash) ) 
             return self._nonDimsHash
         
     @property
@@ -614,7 +656,7 @@ class ModelContext(ModelObject):
             return False
         
     def isEntityIdentifierEqualTo(self, cntx2):
-        return self.entityIdentifier == cntx2.entityIdentifier
+        return self.entityIdentifierHash == cntx2.entityIdentifierHash
     
     def isEqualTo(self, cntx2, dimensionalAspectModel=None):
         if dimensionalAspectModel is None: dimensionalAspectModel = self.modelXbrl.hasXDT
@@ -728,7 +770,11 @@ class ModelDimensionValue(ModelObject):
 
     @property
     def memberQname(self):
-        return self.prefixedNameQname(self.elementText)
+        try:
+            return self._memberQname
+        except AttributeError:
+            self._memberQname = self.prefixedNameQname(self.elementText) if self.isExplicit else None
+            return self._memberQname
         
     @property
     def member(self):
@@ -801,8 +847,9 @@ class ModelUnit(ModelObject):
         return len(measures[0]) == 1 and len(measures[1]) == 0
     
     def isEqualTo(self, unit2):
-        if unit2 is None: return False
-        return self.measures == unit2.measures
+        if unit2 is None or unit2.hash != self.hash: 
+            return False
+        return unit2 is self or self.measures == unit2.measures
     
     @property
     def value(self):

@@ -141,7 +141,7 @@ class ModelParticle():
                 else:
                     self._maxOccurs = _INT(m)
                     if self._maxOccurs < 0: 
-                        raise ValueError(_("maxOccurs must be positive".format(m)))
+                        raise ValueError(_("maxOccurs must be positive").format(m))
             else:
                 self._maxOccurs = 1
             return self._maxOccurs
@@ -161,7 +161,7 @@ class ModelParticle():
             if m:
                 self._minOccurs = _INT(m)
                 if self._minOccurs < 0: 
-                    raise ValueError(_("minOccurs must be positive".format(m)))
+                    raise ValueError(_("minOccurs must be positive").format(m))
             else:
                 self._minOccurs = 1
             return self._minOccurs
@@ -390,10 +390,10 @@ class ModelConcept(ModelNamableTerm, ModelParticle):
     def isRoot(self):
         return self.getparent().localName == "schema"
     
-    def label(self,preferredLabel=None,fallbackToQname=True,lang=None,strip=False):
+    def label(self,preferredLabel=None,fallbackToQname=True,lang=None,strip=False,linkrole=None):
         if preferredLabel is None: preferredLabel = XbrlConst.standardLabel
         if preferredLabel == XbrlConst.conceptNameLabelRole: return str(self.qname)
-        labelsRelationshipSet = self.modelXbrl.relationshipSet(XbrlConst.conceptLabel)
+        labelsRelationshipSet = self.modelXbrl.relationshipSet(XbrlConst.conceptLabel,linkrole)
         if labelsRelationshipSet:
             label = labelsRelationshipSet.label(self, preferredLabel, lang)
             if label is not None:
@@ -857,12 +857,10 @@ class ModelType(ModelNamableTerm):
                     "{http://www.w3.org/2001/XMLSchema}pattern", "{http://www.w3.org/2001/XMLSchema}whiteSpace",  
                     "{http://www.w3.org/2001/XMLSchema}maxInclusive", "{http://www.w3.org/2001/XMLSchema}maxExclusive", "{http://www.w3.org/2001/XMLSchema}minExclusive", 
                     "{http://www.w3.org/2001/XMLSchema}totalDigits", "{http://www.w3.org/2001/XMLSchema}fractionDigits")):
-            XmlValidate.validateFacet(self, facetElt)
+            facetValue = XmlValidate.validateFacet(self, facetElt)
             facetName = facetElt.localName
-            if facetName not in facetValues:
-                facetValue = XmlValidate.validateFacet(self, facetElt)
-                if facetValue:
-                    facetValues[facetName] = facetValue
+            if facetName not in facetValues and facetValue is not None:  # facetValue can be zero but not None
+                facetValues[facetName] = facetValue
         if "enumeration" not in facetValues:
             for facetElt in XmlUtil.schemaFacets(self, ("{http://www.w3.org/2001/XMLSchema}enumeration",)):
                 facetValues.setdefault("enumeration",set()).add(facetElt.get("value"))
@@ -1046,6 +1044,9 @@ class ModelRelationship(ModelObject):
     
     def itersiblings(self, **kwargs):
         return self.arcElement.itersiblings(**kwargs)
+        
+    def getparent(self):
+        return self.arcElement.getparent()
         
     @property
     def fromLabel(self):

@@ -8,11 +8,14 @@
    :license: Apache-2.
    :synopsis: Common controller class to initialize for platform and setup common logger functions
 """
+from __future__ import print_function
 from arelle import PythonUtil # define 2.x or 3.x string types
-import tempfile, os, pickle, sys, logging, gettext, json
+import tempfile, os, io, sys, logging, gettext, json
 from arelle import ModelManager
 from arelle.Locale import getLanguageCodes
+from arelle import PluginManager
 from collections import defaultdict
+isPy3 = (sys.version[0] >= '3')
 
 class Cntlr:
     """
@@ -115,12 +118,12 @@ class Cntlr:
         if not os.path.exists(self.userAppDir):
             os.makedirs(self.userAppDir)
         # load config if it exists
-        self.configPickleFile = self.userAppDir + os.sep + "config.pickle"
+        self.configJsonFile = self.userAppDir + os.sep + "config.json"
         self.config = None
-        if os.path.exists(self.configPickleFile):
+        if os.path.exists(self.configJsonFile):
             try:
-                with open(self.configPickleFile, 'rb') as f:
-                    self.config = pickle.load(f)
+                with io.open(self.configJsonFile, 'rt', encoding='utf-8') as f:
+                    self.config = json.load(f)
             except Exception as ex:
                 self.config = None # restart with a new config
         if not self.config:
@@ -131,14 +134,23 @@ class Cntlr:
             
         # start language translation for domain
         try:
-            gettext.translation("arelle", self.localeDir, getLanguageCodes()).install()
+            gettext.translation("arelle", 
+                                self.localeDir, 
+                                getLanguageCodes(self.config.get("userInterfaceLangOverride",None))).install()
         except Exception as msg:
-            gettext.install("arelle", self.localeDir)
-
+            gettext.install("arelle", 
+                            self.localeDir)
+            
         from arelle.WebCache import WebCache
         self.webCache = WebCache(self, self.config.get("proxySettings"))
         self.modelManager = ModelManager.initialize(self)
         
+        # start plug in server (requres web cache initialized
+        PluginManager.init(self)
+ 
+        self.startLogging(logFileName, logFileMode, logFileEncoding, logFormat)
+        
+    def startLogging(self, logFileName=None, logFileMode=None, logFileEncoding=None, logFormat=None):
         if logFileName: # use default logging
             self.logger = logging.getLogger("arelle")
             if logFileName == "logToPrint":
@@ -152,9 +164,9 @@ class Cntlr:
                 self.logHandler = logging.FileHandler(filename=logFileName, 
                                                       mode=logFileMode if logFileMode else "w", 
                                                       encoding=logFileEncoding if logFileEncoding else "utf-8")
-            self.logHandler.level = logging.DEBUG
             self.logHandler.setFormatter(LogFormatter(logFormat if logFormat else "%(asctime)s [%(messageCode)s] %(message)s - %(file)s\n"))
             self.logger.addHandler(self.logHandler)
+            self.logger.setLevel(logging.DEBUG)
         else:
             self.logger = None
                         
@@ -175,6 +187,7 @@ class Cntlr:
         """.. method:: close(saveConfig=False)
            Close controller and its logger, optionally saaving the user preferences configuration
            :param saveConfig: save the user preferences configuration"""
+        PluginManager.save(self)
         if saveConfig:
             self.saveConfig()
         if self.logger is not None:
@@ -183,8 +196,8 @@ class Cntlr:
     def saveConfig(self):
         """.. method:: saveConfig()
            Save user preferences configuration (in a pickle file)."""
-        with open(self.configPickleFile, 'wb') as f:
-            pickle.dump(self.config, f, pickle.HIGHEST_PROTOCOL)
+        with io.open(self.configJsonFile, 'wt', encoding='utf-8') as f:
+            json.dump(self.config, f, indent=2)
             
     # default non-threaded viewModelObject                 
     def viewModelObject(self, modelXbrl, objectId):
@@ -266,8 +279,10 @@ class LogFormatter(logging.Formatter):
         # provide a file parameter made up from refs entries
         fileLines = defaultdict(set)
         for ref in record.refs:
-            fileLines[ref["href"].partition("#")[0]].add(ref.get("sourceLine"))
-        record.file = ", ".join(file + " " + ', '.join(str(line) for line in lines if line)
+            fileLines[ref["href"].partition("#")[0]].add(ref.get("sourceLine", 0))
+        record.file = ", ".join(file + " " + ', '.join(str(line) 
+                                                       for line in sorted(lines, key=lambda l: l)
+                                                       if line)
                                 for file, lines in sorted(fileLines.items()))
         formattedMessage = super(LogFormatter, self).format(record)
         del record.file
@@ -282,7 +297,10 @@ class LogToPrintHandler(logging.Handler):
     CAUTION: Output is utf-8 encoded, which is fine for saving to files, but may not display correctly in terminal windows.
     """
     def emit(self, logRecord):
-        print(self.format(logRecord).encode("utf-8"))
+        if isPy3:
+            print(self.format(logRecord))
+        else:
+            print(self.format(logRecord).encode("utf-8"))
 
 class LogHandlerWithXml(logging.Handler):        
     def __init__(self):
@@ -291,18 +309,19 @@ class LogHandlerWithXml(logging.Handler):
     def recordToXml(self, logRec):
         msg = self.format(logRec)
         if logRec.args:
-            args = "".join([' {0}="{1}"'.format(n, v.replace('"','&quot;')) for n, v in logRec.args.items()])
+            args = "".join([' {0}="{1}"'.format(n, str(v).replace('"','&quot;')) for n, v in logRec.args.items()])
         else:
             args = ""
-        refs = "".join('<ref href="{0}"{1}/>'.format(
+        refs = "\n".join('<ref href="{0}"{1}/>'.format(
                         ref["href"], 
                         ' sourceLine="{0}"'.format(ref["sourceLine"]) if "sourceLine" in ref else '')
                        for ref in logRec.refs)
-        return ('<entry code="{0}" level="{1}" file="{2}" sourceLine="{3}">'
-                '<message{4}>{5}</message>{6}'
+        return ('<entry code="{0}" level="{1}">'
+                '<message{2}>{3}</message>{4}'
                 '</entry>\n'.format(logRec.messageCode, 
                                     logRec.levelname.lower(), 
-                                    args, msg.replace("&","&amp;").replace("<","&lt;"), 
+                                    args, 
+                                    msg.replace("&","&amp;").replace("<","&lt;"), 
                                     refs))
 
 class LogToXmlHandler(LogHandlerWithXml):

@@ -48,6 +48,25 @@ class ModelTestcaseVariation(ModelObject):
         return None
 
     @property
+    def reference(self):
+        efmNameElts = XmlUtil.children(self.getparent(), None, "name")
+        for efmNameElt in efmNameElts:
+            if efmNameElt is not None and efmNameElt.text.startswith("EDGAR"):
+                return efmNameElt.text
+        referenceElement = XmlUtil.descendant(self, None, "reference")
+        if referenceElement is not None: # formula test suite
+            return "{0}#{1}".format(referenceElement.get("specification"), referenceElement.get("id"))
+        descriptionElement = XmlUtil.descendant(self, None, "description")
+        if descriptionElement is not None and descriptionElement.get("reference"):
+            return descriptionElement.get("reference")  # xdt test suite
+        if self.getparent().get("description"):
+            return self.getparent().get("description")  # base spec 2.1 test suite
+        functRegistryRefElt = XmlUtil.descendant(self.getparent(), None, "reference")
+        if functRegistryRefElt is not None: # function registry
+            return functRegistryRefElt.get("{http://www.w3.org/1999/xlink}href")
+        return None
+
+    @property
     def readMeFirstUris(self):
         try:
             return self._readMeFirstUris
@@ -75,7 +94,7 @@ class ModelTestcaseVariation(ModelObject):
             return self._parameters
         except AttributeError:
             self._parameters = dict([
-                (ModelValue.qname(paramElt, paramElt.get("name"),noPrefixIsNoNamespace=True),
+                (ModelValue.qname(paramElt, paramElt.get("name")), # prefix-less parameter names take default namespace of element 
                  (ModelValue.qname(paramElt, paramElt.get("datatype")),paramElt.get("value"))) 
                 for paramElt in XmlUtil.descendants(self, self.namespaceURI, "parameter")])
             return self._parameters
@@ -99,6 +118,21 @@ class ModelTestcaseVariation(ModelObject):
             return XmlUtil.text(resultInstance)
         return None
     
+    @property
+    def resultIsInfoset(self):
+        if self.modelDocument.outpath:
+            result = XmlUtil.descendant(self, None, "result")
+            if result is not None:
+                return XmlUtil.child(result, None, "file") is not None or XmlUtil.text(result).endswith(".xml")
+        return False
+        
+    @property
+    def resultInfosetUri(self):
+        result = XmlUtil.descendant(self, None, "result")
+        if result is not None:
+            child = XmlUtil.child(result, None, "file")
+            return os.path.join(self.modelDocument.outpath, XmlUtil.text(child if child is not None else result))
+        return None    
     
     @property
     def cfcnCall(self):
@@ -193,6 +227,7 @@ class ModelTestcaseVariation(ModelObject):
                [("status", self.status),
                 ("call", self.cfcnCall[0]) if self.cfcnCall else (),
                 ("test", self.cfcnTest[0]) if self.cfcnTest else (),
+                ("infoset", self.resultInfosetUri) if self.resultIsInfoset else (),
                 ("expected", self.expected) if self.expected else (),
                 ("actual", " ".join(str(i) for i in self.actual) if len(self.actual) > 0 else ())] + \
                 assertions

@@ -4,7 +4,7 @@ Created on Oct 5, 2010
 @author: Mark V Systems Limited
 (c) Copyright 2010 Mark V Systems Limited, All rights reserved.
 '''
-import os, posixpath, sys, re, shutil, time, pickle
+import os, posixpath, sys, re, shutil, time, calendar, io, json
 if sys.version[0] >= '3':
     from urllib.parse import unquote
     from urllib.error import (URLError, HTTPError, ContentTooShortError)
@@ -15,6 +15,8 @@ else: # python 2.7.2
     from urllib import ContentTooShortError
     from urllib2 import URLError, HTTPError
     import urllib2 as proxyhandlers
+    
+DIRECTORY_INDEX_FILE = "!~DirectoryIndex~!"
 
 def proxyDirFmt(httpProxyTuple):
     if isinstance(httpProxyTuple,tuple) and len(httpProxyTuple) == 5:
@@ -36,6 +38,16 @@ def proxyDirFmt(httpProxyTuple):
             return {}  # block use of any proxy
     else:
         return None # use system proxy
+    
+def proxyTuple(url): # system, none, or http:[user[:passowrd]@]host[:port]
+    if url == "none":
+        return (False, "", "", "", "")
+    elif url == "system":
+        return (True, "", "", "", "")
+    userpwd, sep, hostport = url.rpartition("://")[2].rpartition("@")
+    urlAddr, sep, urlPort = hostport.partition(":")
+    user, sep, password = userpwd.partition(":")
+    return (False, urlAddr, urlPort, user, password)
     
 def lastModifiedTime(headers):
     if headers:
@@ -64,22 +76,29 @@ class WebCache:
         
         if sys.platform == "darwin":
             self.cacheDir = cntlr.userAppDir.replace("Application Support","Caches")
+            self.encodeFileChars = re.compile(r'[:^]') 
+            
         else:  #windows and unix
             self.cacheDir = cntlr.userAppDir + os.sep + "cache"
+            if sys.platform.startswith("win"):
+                self.encodeFileChars = re.compile(r'[<>:"\\|?*^]')
+            else:
+                self.encodeFileChars = re.compile(r'[:^]') 
+        self.decodeFileChars = re.compile(r'\^[0-9]{3}')
         self.workOffline = False
         self.maxAgeSeconds = 60.0 * 60.0 * 24.0 * 7.0 # seconds before checking again for file
-        self.urlCheckPickleFile = cntlr.userAppDir + os.sep + "cachedUrlCheckTimes.pickle"
+        self.urlCheckJsonFile = cntlr.userAppDir + os.sep + "cachedUrlCheckTimes.json"
         try:
-            with open(self.urlCheckPickleFile, 'rb') as f:
-                self.cachedUrlCheckTimes = pickle.load(f)
+            with io.open(self.urlCheckJsonFile, 'rt', encoding='utf-8') as f:
+                self.cachedUrlCheckTimes = json.load(f)
         except Exception:
             self.cachedUrlCheckTimes = {}
         self.cachedUrlCheckTimesModified = False
             
     def saveUrlCheckTimes(self):
         if self.cachedUrlCheckTimesModified:
-            with open(self.urlCheckPickleFile, 'wb') as f:
-                pickle.dump(self.cachedUrlCheckTimes, f, pickle.HIGHEST_PROTOCOL)
+            with io.open(self.urlCheckJsonFile, 'wt', encoding='utf-8') as f:
+                json.dump(self.cachedUrlCheckTimes, f, indent=0)
         self.cachedUrlCheckTimesModified = False
         
     def resetProxies(self, httpProxyTuple):
@@ -110,6 +129,8 @@ class WebCache:
                     prot, sep, path = base.partition("://")
                     normedPath = prot + sep + posixpath.normpath(os.path.dirname(path) + "/" + url)
                 else:
+                    if '%' in base:
+                        base = unquote(base)
                     normedPath = os.path.normpath(os.path.join(os.path.dirname(base),url))
             else:
                 normedPath = url
@@ -124,29 +145,69 @@ class WebCache:
             elif os.path.sep == '\\' and '/' in normedPath:
                 normedPath = normedPath.replace('/', '\\') # convert MSFT paths into '\' when normalizing
             if normedPath.startswith(self.cacheDir):
-                urlparts = normedPath[len(self.cacheDir)+1:].partition(os.sep)
-                normedPath = urlparts[0] + '://' + urlparts[2].replace('\\','/')
+                normedPath = self.cacheFilepathToUrl(normedPath)
         return normedPath
+
+    def encodeForFilename(self, pathpart):
+        return self.encodeFileChars.sub(lambda m: '^{0:03}'.format(ord(m.group(0))), pathpart)
     
-    def getfilename(self, url, base=None, reload=False):
+    def urlToCacheFilepath(self, url):
+        filepath = [self.cacheDir, 'http'] 
+        pathparts = url[7:].split('/')
+        user, sep, server = pathparts[0].partition("@")
+        if not sep:
+            server = user
+            user = None
+        host, sep, port = server.partition(':')
+        filepath.append(self.encodeForFilename(host))
+        if port:
+            filepath.append("^port" + port)
+        if user:
+            filepath.append("^user" + self.encodeForFilename(user) ) # user may have : or other illegal chars
+        filepath.extend(self.encodeForFilename(pathpart) for pathpart in pathparts[1:])
+        if url.endswith("/"):  # default index file
+            filepath.append(DIRECTORY_INDEX_FILE)
+        return os.sep.join(filepath)
+    
+    def cacheFilepathToUrl(self, cacheFilepath):
+        urlparts = cacheFilepath[len(self.cacheDir)+1:].split(os.sep)
+        urlparts[0] += ':/'  # add separator between http and file parts, less one '/'
+        if urlparts[2].startswith("^port"):
+            urlparts[1] += ":" + urlparts[2][5:]  # the port number
+            del urlparts[2]
+        if urlparts[2].startswith("^user"):
+            urlparts[1] = urlparts[2][5:] + "@" + urlparts[1]  # the user part
+            del urlparts[2]
+        if urlparts[-1] == DIRECTORY_INDEX_FILE:
+            urlparts[-1] = ""  # restore default index file syntax
+        return '/'.join(self.decodeFileChars  # remove cacheDir part
+                        .sub(lambda c: chr( int(c.group(0)[1:]) ), # remove ^nnn encoding
+                         urlpart) for urlpart in urlparts)
+            
+    def getfilename(self, url, base=None, reload=False, checkModifiedTime=False, normalize=False):
         if url is None:
             return url
-        if base is not None:
+        if base is not None or normalize:
             url = self.normalizeUrl(url, base)
         if url.startswith('http://'):
-            # form cache file name
-            filepath = self.cacheDir + os.sep + 'http' + os.sep + url[7:]
+            # form cache file name (substituting _ for any illegal file characters)
+            filepath = self.urlToCacheFilepath(url)
             # handle default directory requests
             if filepath.endswith("/"):
-                filepath += "default.unknown"
+                filepath += DIRECTORY_INDEX_FILE
             if os.sep == '\\':
                 filepath = filepath.replace('/', '\\')
             if self.workOffline:
                 return filepath
             filepathtmp = filepath + ".tmp"
             timeNow = time.time()
+            timeNowStr = time.strftime('%Y-%m-%dT%H:%M:%S UTC', time.gmtime(timeNow))
             if not reload and os.path.exists(filepath):
-                if timeNow - self.cachedUrlCheckTimes.get(url, 0.0) > self.maxAgeSeconds:
+                if url in self.cachedUrlCheckTimes and not checkModifiedTime:
+                    cachedTime = calendar.timegm(time.strptime(self.cachedUrlCheckTimes[url], '%Y-%m-%dT%H:%M:%S UTC'))
+                else:
+                    cachedTime = 0
+                if timeNow - cachedTime > self.maxAgeSeconds:
                     # weekly check if newer file exists
                     newerOnWeb = False
                     try: # no provision here for proxy authentication!!!
@@ -157,7 +218,7 @@ class WebCache:
                         pass # for now, forget about authentication here
                     if not newerOnWeb:
                         # update ctime by copying file and return old file
-                        self.cachedUrlCheckTimes[url] = timeNow
+                        self.cachedUrlCheckTimes[url] = timeNowStr
                         self.cachedUrlCheckTimesModified = True
                         return filepath
                 else:
@@ -230,7 +291,7 @@ class WebCache:
                 webFileTime = lastModifiedTime(headers)
                 if webFileTime: # set mtime to web mtime
                     os.utime(filepath,(webFileTime,webFileTime))
-                self.cachedUrlCheckTimes[url] = timeNow
+                self.cachedUrlCheckTimes[url] = timeNowStr
                 self.cachedUrlCheckTimesModified = True
                 return filepath
         

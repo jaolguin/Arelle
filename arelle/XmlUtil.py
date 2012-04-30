@@ -126,9 +126,12 @@ def textNotStripped(element):
         return ""
     return element.elementText  # allows embedded comment nodes, returns '' if None
 
-def innerText(element, ixExclude=False):   
+def innerText(element, ixExclude=False, strip=True):   
     try:
-        return "".join(text for text in innerTextNodes(element, ixExclude)).strip()
+        text = "".join(text for text in innerTextNodes(element, ixExclude))
+        if strip:
+            return text.strip()
+        return text
     except TypeError:
         return ""
 
@@ -147,8 +150,8 @@ def innerTextNodes(element, ixExclude):
            (child.localName != "exclude" and child.namespaceURI != "http://www.xbrl.org/2008/inlineXBRL")):
             for nestedText in innerTextNodes(child, ixExclude):
                 yield nestedText
-    if element.tail:
-        yield element.tail
+        if child.tail:
+            yield child.tail
 
 def parentId(element, parentNamespaceURI, parentLocalName):
     while element is not None:
@@ -273,10 +276,12 @@ def descendants(element, descendantNamespaceURI, descendantLocalNames, attrName=
                 if attrName:
                     if child.get(attrName) == attrValue or (attrValue == "*" and child.get(attrName) is not None):
                         descendants.append(child)
+                        if breakOnFirst:
+                            break
                 else: 
                     descendants.append(child)
-                if breakOnFirst:
-                    break
+                    if breakOnFirst:
+                        break
     return descendants
     
 def isDescendantOf(element, ancestorElement):
@@ -471,10 +476,14 @@ def setXmlns(modelDocument, prefix, namespaceURI):
     if prefix == "":
         prefix = None  # default xmlns prefix stores as None
     if prefix not in root.nsmap:
-        newmap = root.nsmap
-        newmap[prefix] = namespaceURI
-        newroot = etree.Element(root.tag, nsmap=newmap)
-        newroot.extend(root)
+        if root.tag == 'nsmap': # already have an xmlns-extension root element
+            newmap = root.nsmap
+            newmap[prefix] = namespaceURI
+            newroot = etree.Element('nsmap', nsmap=newmap)
+            newroot.extend(root)
+        else:  # new xmlns-extension root
+            newroot = etree.Element('nsmap', nsmap={prefix: namespaceURI})
+            newroot.append(root)
         elementTree._setroot(newroot)
 
 def sortKey(parentElement, childNamespaceUri, childLocalNames, childAttributeName=None, qnames=False):
@@ -569,7 +578,7 @@ def xpointerElement(modelDocument, fragmentIdentifier):
                 parent = node
                 node = None
                 for child in iter:
-                    if isinstance(child,ModelObject):
+                    if isinstance(child,etree._Element):
                         if childNbr == eltNbr:
                             node = child
                             break
@@ -583,23 +592,58 @@ def xpointerElement(modelDocument, fragmentIdentifier):
     return None
 
 def elementFragmentIdentifier(element):
-    if element.id:
-        return element.id  # "short hand pointer" for element fragment identifier
+    if isinstance(element,etree._Element) and element.get('id'):
+        return element.get('id')  # "short hand pointer" for element fragment identifier
     else:
         childSequence = [""] # "" represents document element for / (root) on the join below
         while element is not None:
-            if isinstance(element,ModelObject):
-                if element.id:  # has ID, use as start of path instead of root
-                    childSequence[0] = element.id
+            if isinstance(element,etree._Element):
+                if element.get('id'):  # has ID, use as start of path instead of root
+                    childSequence[0] = element.get('id')
                     break
                 siblingPosition = 1
                 for sibling in element.itersiblings(preceding=True):
-                    if isinstance(sibling,ModelObject):
+                    if isinstance(sibling,etree._Element):
                         siblingPosition += 1
                 childSequence.insert(1, str(siblingPosition))
             element = element.getparent()
         location = "/".join(childSequence)
         return "element({0})".format(location)
+    
+def ixToXhtml(fromRoot):
+    toRoot = etree.Element(fromRoot.localName)
+    copyNonIxChildren(fromRoot, toRoot)
+    for attrTag, attrValue in fromRoot.items():
+        toRoot.set(attrTag, attrValue)
+    return toRoot
+
+def copyNonIxChildren(fromElt, toElt):
+    for fromChild in fromElt:
+        if isinstance(fromChild, ModelObject):
+            fromTag = fromChild.tag
+            if fromTag not in {"{http://www.xbrl.org/2008/inlineXBRL}references",
+                               "{http://www.xbrl.org/2008/inlineXBRL}resources"}:
+                if fromTag in {"{http://www.xbrl.org/2008/inlineXBRL}footnote",
+                               "{http://www.xbrl.org/2008/inlineXBRL}nonNumeric"}:
+                    toChild = etree.Element("ixNestedContent")
+                    toElt.append(toChild)
+                    copyNonIxChildren(fromChild, toChild)
+                    if fromChild.text is not None:
+                        toChild.text = fromChild.text
+                    if fromChild.tail is not None:
+                        toChild.tail = fromChild.tail
+                elif fromTag.startswith("{http://www.xbrl.org/2008/inlineXBRL}"):
+                    copyNonIxChildren(fromChild, toElt)
+                else:
+                    toChild = etree.Element(fromChild.localName)
+                    toElt.append(toChild)
+                    copyNonIxChildren(fromChild, toChild)
+                    for attrTag, attrValue in fromChild.items():
+                        toChild.set(attrTag, attrValue)
+                    if fromChild.text is not None:
+                        toChild.text = fromChild.text
+                    if fromChild.tail is not None:
+                        toChild.tail = fromChild.tail
     
 def writexml(writer, node, encoding=None, indent='', parentNsmap=None):
     # customized from xml.minidom to provide correct indentation for data items
@@ -689,7 +733,7 @@ def writexml(writer, node, encoding=None, indent='', parentNsmap=None):
         firstChild = True
         text = node.text
         if text is not None:
-            text = text.replace("\u00A0","&nbsp;").strip().replace("&","&amp;").replace("<","&lt;").replace("\u00AD","&shy;")
+            text = text.replace("&","&amp;").replace("\u00A0","&nbsp;").strip().replace("<","&lt;").replace("\u00AD","&shy;")
         for child in node.iterchildren():
             hasChildNodes = True
             if firstChild:

@@ -52,7 +52,6 @@ def load(modelXbrl, uri, base=None, referringElement=None, isEntry=False, isDisc
         modelXbrl.error("FileNotLoadable",
                 _("File can not be loaded: %(fileName)s"),
                 modelObject=referringElement, fileName=mappedUri)
-        type = Type.Unknown
         return None
     
     modelDocument = modelXbrl.urlDocs.get(mappedUri)
@@ -81,18 +80,19 @@ def load(modelXbrl, uri, base=None, referringElement=None, isEntry=False, isDisc
         modelXbrl.error("IOerror",
                 _("%(fileName)s: file error: %(error)s"),
                 modelObject=referringElement, fileName=os.path.basename(uri), error=str(err))
-        type = Type.Unknown
         return None
     except (etree.LxmlError,
             ValueError) as err:  # ValueError raised on bad format of qnames, xmlns'es, or parameters
-        modelXbrl.error("xmlSchema:syntax",
-                _("%(error)s, %(fileName)s, %(sourceAction)s source element"),
-                modelObject=referringElement, fileName=os.path.basename(uri), 
-                error=str(err), sourceAction=("including" if isIncluded else "importing"))
-        type = Type.Unknown
         if file:
             file.close()
-        return None
+        if not isEntry and str(err) == "Start tag expected, '<' not found, line 1, column 1":
+            return ModelDocument(modelXbrl, Type.UnknownNonXML, mappedUri, filepath, None)
+        else:
+            modelXbrl.error("xmlSchema:syntax",
+                    _("%(error)s, %(fileName)s, %(sourceAction)s source element"),
+                    modelObject=referringElement, fileName=os.path.basename(uri), 
+                    error=str(err), sourceAction=("including" if isIncluded else "importing"))
+            return None
     
     # identify document
     #modelXbrl.modelManager.addToLog("discovery: {0}".format(
@@ -118,7 +118,7 @@ def load(modelXbrl, uri, base=None, referringElement=None, isEntry=False, isDisc
                 type = Type.INSTANCE
         elif ns == XbrlConst.xhtml and \
              (ln == "html" or ln == "xhtml"):
-            type = Type.Unknown
+            type = Type.UnknownXML
             if XbrlConst.ixbrl in rootNode.nsmap.values():
                 type = Type.INLINEXBRL
         elif ln == "report" and ns == XbrlConst.ver:
@@ -131,8 +131,12 @@ def load(modelXbrl, uri, base=None, referringElement=None, isEntry=False, isDisc
             type = Type.REGISTRY
         elif ln == "rss":
             type = Type.RSSFEED
+        elif ln == "ptvl":
+            type = Type.ARCSINFOSET
+        elif ln == "facts":
+            type = Type.FACTDIMSINFOSET
         else:
-            type = Type.Unknown
+            type = Type.UnknownXML
             nestedInline = None
             for htmlElt in rootNode.iter(tag="{http://www.w3.org/1999/xhtml}html"):
                 nestedInline = htmlElt
@@ -223,7 +227,7 @@ def create(modelXbrl, type, uri, schemaRefs=None, isEntry=False):
     elif type == Type.DTSENTRIES:
         Xml = None
     else:
-        type = Type.Unknown
+        type = Type.UnknownXML
         Xml = '<nsmap/>'
     if Xml:
         import io
@@ -263,31 +267,40 @@ def create(modelXbrl, type, uri, schemaRefs=None, isEntry=False):
 
     
 class Type:
-    Unknown=0
-    SCHEMA=1
-    LINKBASE=2
-    INSTANCE=3
-    INLINEXBRL=4
-    DTSENTRIES=5  # multiple schema/linkbase Refs composing a DTS but not from an instance document
-    VERSIONINGREPORT=6
-    TESTCASESINDEX=7
-    TESTCASE=8
-    REGISTRY=9
-    REGISTRYTESTCASE=10
-    RSSFEED=11
+    UnknownXML=0
+    UnknownNonXML=1
+    UnknownTypes=1  # to test if any unknown type, use <= Type.UnknownTypes
+    firstXBRLtype=2  # first filetype that is XBRL and can hold a linkbase, etc inside it
+    SCHEMA=2
+    LINKBASE=3
+    INSTANCE=4
+    INLINEXBRL=5
+    lastXBRLtype=5  # first filetype that is XBRL and can hold a linkbase, etc inside it
+    DTSENTRIES=6  # multiple schema/linkbase Refs composing a DTS but not from an instance document
+    VERSIONINGREPORT=7
+    TESTCASESINDEX=8
+    TESTCASE=9
+    REGISTRY=10
+    REGISTRYTESTCASE=11
+    RSSFEED=12
+    ARCSINFOSET=13
+    FACTDIMSINFOSET=14
 
-    typeName = ("unknown", 
+    typeName = ("unknown XML",
+                "unknown non-XML", 
                 "schema", 
                 "linkbase", 
                 "instance", 
                 "inline XBRL instance",
                 "entry point set",
                 "versioning report",
-                "testcasesindex", 
+                "testcases index", 
                 "testcase",
                 "registry",
                 "registry testcase",
-                "RSS feed")
+                "RSS feed",
+                "arcs infoset",
+                "fact dimensions infoset")
     
 # schema elements which end the include/import scah
 schemaBottom = {"element", "attribute", "notation", "simpleType", "complexType", "group", "attributeGroup"}
@@ -331,6 +344,10 @@ class ModelDocument:
     @property
     def basename(self):
         return os.path.basename(self.filepath)
+    
+    @property
+    def filepathdir(self):
+        return os.path.dirname(self.filepath)
 
     @property
     def propertyView(self):
@@ -631,7 +648,7 @@ class ModelDocument:
                 doc = load(self.modelXbrl, url, isDiscovered=not nonDTS, base=self.baseForElement(element), referringElement=element)
                 if not nonDTS and doc is not None and self.referencesDocument.get(doc) is None:
                     self.referencesDocument[doc] = "href"
-                    if not doc.inDTS and doc.type != Type.Unknown:    # non-XBRL document is not in DTS
+                    if not doc.inDTS and doc.type > Type.UnknownTypes:    # non-XBRL document is not in DTS
                         doc.inDTS = True    # now known to be discovered
                         if doc.type == Type.SCHEMA: # schema coming newly into DTS
                             doc.schemaDiscoverChildElements(doc.xmlRootElement)
@@ -685,9 +702,15 @@ class ModelDocument:
         self.modelXbrl.units[unitElement.id] = unitElement
                 
     def inlineXbrlDiscover(self, htmlElement):
-        self.schemaLinkbaseRefsDiscover(htmlElement)
+        if htmlElement.namespaceURI == XbrlConst.xhtml:  # must validate xhtml
+            #load(self.modelXbrl, "http://www.w3.org/2002/08/xhtml/xhtml1-strict.xsd")
+            XmlValidate.xhtmlValidate(self.modelXbrl, htmlElement)  # fails on prefixed content
+        for inlineElement in htmlElement.iterdescendants(tag="{http://www.xbrl.org/2008/inlineXBRL}references"):
+            self.schemaLinkbaseRefsDiscover(inlineElement)
+            XmlValidate.validate(self.modelXbrl, inlineElement) # validate instance elements
         for inlineElement in htmlElement.iterdescendants(tag="{http://www.xbrl.org/2008/inlineXBRL}resources"):
             self.instanceContentsDiscover(inlineElement)
+            XmlValidate.validate(self.modelXbrl, inlineElement) # validate instance elements
             
         tupleElements = []
         tuplesByTupleID = {}
@@ -710,16 +733,18 @@ class ModelDocument:
             tupleFact.modelTupleFacts = [
                  self.modelXbrl.modelObject(objectIndex) 
                  for order,objectIndex in sorted(tupleFact.unorderedTupleFacts)]
+            
+        # validate particle structure of elements after transformations and established tuple structure
+        for rootModelFact in self.modelXbrl.facts:
+            XmlValidate.validate(self.modelXbrl, rootModelFact, ixFacts=True)
 
                 
     def inlineXbrlLocateFactInTuple(self, modelFact, tuplesByTupleID):
         tupleRef = modelFact.tupleRef
-        if modelFact.text == "37":
-            pass
         tuple = None
         if tupleRef:
             if tupleRef not in tuplesByTupleID:
-                self.modelXbrl.error("ixerr:tupleRefMissing",
+                self.modelXbrl.error("ix.13.1.2:tupleRefMissing",
                         _("Inline XBRL tupleRef %(tupleRef)s not found"),
                         modelObject=modelFact, tupleRef=tupleRef)
             else:
@@ -741,7 +766,7 @@ class ModelDocument:
                 parentModelFacts = self.modelXbrl.facts
         if isinstance(modelFact, ModelFact):
             parentModelFacts.append( modelFact )
-            self.modelXbrl.factsInInstance.append( modelFact )
+            self.modelXbrl.factsInInstance.add( modelFact )
             for tupleElement in modelFact:
                 if isinstance(tupleElement,ModelObject) and tupleElement.tag not in fractionParts:
                     self.factDiscover(tupleElement, modelFact.modelTupleFacts)
@@ -770,6 +795,7 @@ class ModelDocument:
         isTransformTestcase = testcaseElement.namespaceURI == "http://xbrl.org/2011/conformance-rendering/transforms"
         if XmlUtil.xmlnsprefix(testcaseElement, XbrlConst.cfcn) or isTransformTestcase:
             self.type = Type.REGISTRYTESTCASE
+        self.outpath = self.xmlRootElement.get("outpath") 
         self.testcaseVariations = []
         priorTransformName = None
         for modelVariation in XmlUtil.descendants(testcaseElement, testcaseElement.namespaceURI, "variation"):

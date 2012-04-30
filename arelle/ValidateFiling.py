@@ -13,6 +13,7 @@ from arelle import (ModelDocument, ModelValue, ValidateXbrl,
 from arelle.ModelObject import ModelObject
 from arelle.ModelInstanceObject import ModelFact
 from arelle.ModelDtsObject import ModelConcept
+from arelle.PluginManager import pluginClassMethods
 
 datePattern = None
 
@@ -20,7 +21,7 @@ class ValidateFiling(ValidateXbrl.ValidateXbrl):
     def __init__(self, modelXbrl):
         super(ValidateFiling, self).__init__(modelXbrl)
         
-        global datePattern, GFMcontextDatePattern, signOrCurrencyPattern, usTypesPattern, usRolesPattern, usDeiPattern
+        global datePattern, GFMcontextDatePattern, signOrCurrencyPattern, usTypesPattern, usRolesPattern, usDeiPattern, instanceFileNamePattern
         
         if datePattern is None:
             datePattern = re.compile(r"([12][0-9]{3})-([01][0-9])-([0-3][0-9])")
@@ -30,12 +31,13 @@ class ValidateFiling(ValidateXbrl.ValidateXbrl):
             usTypesPattern = re.compile(r"^http://(xbrl.us|fasb.org)/us-types/")
             usRolesPattern = re.compile(r"^http://(xbrl.us|fasb.org)/us-roles/")
             usDeiPattern = re.compile(r"http://(xbrl.us|xbrl.sec.gov)/dei/")
-
+            instanceFileNamePattern = re.compile(r"^(\w+)-([12][0-9]{3}[01][0-9][0-3][0-9]).xml$")
         
     def validate(self, modelXbrl, parameters=None):
         if not hasattr(modelXbrl.modelDocument, "xmlDocument"): # not parsed
             return
         
+        self._isStandardUri = {}
         modelXbrl.modelManager.disclosureSystem.loadStandardTaxonomiesDict()
         
         # find typedDomainRefs before validateXBRL pass
@@ -55,21 +57,7 @@ class ValidateFiling(ValidateXbrl.ValidateXbrl):
         super(ValidateFiling,self).validate(modelXbrl, parameters)
         xbrlInstDoc = modelXbrl.modelDocument.xmlDocument.getroot()
         disclosureSystem = self.disclosureSystem
-        _isStandardUri = {}
         
-        def isStandardUri(uri):
-            try:
-                return _isStandardUri[uri]
-            except KeyError:
-                isStd = (uri in disclosureSystem.standardTaxonomiesDict or
-                         (not uri.startswith("http://") and 
-                          # try 2011-12-23 RH: if works, remove the localHrefs
-                          # any(u.endswith(e) for u in (uri.replace("\\","/"),) for e in disclosureSystem.standardLocalHrefs)
-                          "/basis/sbr/" in uri.replace("\\","/")
-                          ))
-                _isStandardUri[uri] = isStd
-                return isStd
-
         modelXbrl.modelManager.showStatus(_("validating {0}").format(disclosureSystem.name))
         
         self.modelXbrl.profileActivity()
@@ -84,9 +72,28 @@ class ValidateFiling(ValidateXbrl.ValidateXbrl):
         validateInlineXbrlGFM = (modelXbrl.modelDocument.type == ModelDocument.Type.INLINEXBRL and
                                  self.validateGFM)
         
+        if self.validateEFM:
+            for pluginXbrlMethod in pluginClassMethods("Validate.EFM.Start"):
+                pluginXbrlMethod(self)
+                
         # instance checks
+        self.fileNameBasePart = None # prevent testing on fileNameParts if not instance or invalid
         if modelXbrl.modelDocument.type == ModelDocument.Type.INSTANCE or \
            modelXbrl.modelDocument.type == ModelDocument.Type.INLINEXBRL:
+            #6.3.3 filename check
+            m = instanceFileNamePattern.match(modelXbrl.modelDocument.basename)
+            if m:  # has acceptable pattern
+                self.fileNameBasePart = m.group(1)
+                self.fileNameDatePart = m.group(2)
+                if not self.fileNameBasePart:
+                    modelXbrl.error(("EFM.6.03.03", "GFM.1.01.01"),
+                        _('Invalid instance document base name part (ticker or mnemonic name) in "{base}-{yyyymmdd}.xml": %(filename)s'),
+                        modelObject=modelXbrl.modelDocument, filename=modelXbrl.modelDocument.basename)
+            else:
+                modelXbrl.error(("EFM.6.03.03", "GFM.1.01.01"),
+                    _('Invalid instance document name, must match "{base}-{yyyymmdd}.xml": %(filename)s'),
+                    modelObject=modelXbrl.modelDocument, filename=modelXbrl.modelDocument.basename)
+            
             #6.5.1 scheme, 6.5.2, 6.5.3 identifier
             entityIdentifierValue = None
             entityIdentifierValueElt = None
@@ -302,6 +309,9 @@ class ValidateFiling(ValidateXbrl.ValidateXbrl):
                                     
                         if isEntityCommonStockSharesOutstanding and not hasClassOfStockMember:
                             hasUndefinedDefaultStockMember = True   # absent dimension, may be no def LB
+                    if self.validateEFM:
+                        for pluginXbrlMethod in pluginClassMethods("Validate.EFM.Fact"):
+                            pluginXbrlMethod(self, f)
                 #6.5.17 facts with precision
                 concept = f.concept
                 if concept is None:
@@ -631,7 +641,7 @@ class ValidateFiling(ValidateXbrl.ValidateXbrl):
                             elif facts[0].context.instantDatetime != commonStockMeasurementDatetime:
                                 modelXbrl.error("EFM.6.05.26",
                                     _("dei:EntityCommonStockSharesOutstanding is required for DocumentType '%(documentType)s' in stock class %(stockClass)s with measurement date %(date)s"),
-                                    modelObject=documentTypeFact, documentType=documentType, stockClasse=mem, date=commonStockMeasurementDatetime)
+                                    modelObject=documentTypeFact, documentType=documentType, stockClass=mem, date=commonStockMeasurementDatetime)
                     elif hasUndefinedDefaultStockMember and not defaultSharesOutstanding:
                             modelXbrl.error("EFM.6.05.26",
                                 _("dei:EntityCommonStockSharesOutstanding is required for DocumentType '%(documentType)s' but missing for a non-default-context fact"),
@@ -790,7 +800,7 @@ class ValidateFiling(ValidateXbrl.ValidateXbrl):
                     modelXbrl.error(("EFM.6.18.01", "GFM.1.9.1"),
                         _("References for extension concept %(concept)s are not allowed: %(text)s"),
                         modelObject=modelReference, concept=concept.qname, text=text)
-                elif (self.validateEFM or self.validateSBRNL) and not isStandardUri(modelRefRel.modelDocument.uri): 
+                elif (self.validateEFM or self.validateSBRNL) and not self.isStandardUri(modelRefRel.modelDocument.uri): 
                     #6.18.2 no extension to add or remove references to standard concepts
                     modelXbrl.error(("EFM.6.18.02", "SBR.NL.2.1.0.08"),
                         _("References for standard taxonomy concept %(concept)s are not allowed in an extension linkbase: %(text)s"),
@@ -1031,7 +1041,7 @@ class ValidateFiling(ValidateXbrl.ValidateXbrl):
                             for rel in rels:
                                 relTo = rel.toModelObject
     
-                                if not (relTo.type is not None and relTo.type.isDomainItemType) and not isStandardUri(rel.modelDocument.uri):
+                                if not (relTo.type is not None and relTo.type.isDomainItemType) and not self.isStandardUri(rel.modelDocument.uri):
                                     self.modelXbrl.error(("EFM.6.16.03", "GFM.1.08.03"),
                                         _("Definition relationship from %(conceptFrom)s to %(conceptTo)s in role %(linkrole)s requires domain item target"),
                                         modelObject=(rel, relFrom, relTo), conceptFrom=relFrom.qname, conceptTo=relTo.qname, linkrole=rel.linkrole)
@@ -1094,9 +1104,14 @@ class ValidateFiling(ValidateXbrl.ValidateXbrl):
                 
         for fromIndx, toIndxs in usedCalcsPresented.items():
             for toIndx in toIndxs:
+                fromModelObject = self.modelXbrl.modelObject(fromIndx)
+                toModelObject = self.modelXbrl.modelObject(toIndx)
                 self.modelXbrl.error(("EFM.6.14.05", "GFM.1.7.5"),
                     _("Used calculation relationship from %(conceptFrom)s to %(conceptTo)s does not participate in an effective presentation relationship"),
-                    modelObject=self.modelXbrl.modelObject(fromIndx), conceptFrom=self.modelXbrl.modelObject(fromIndx).qname, conceptTo=self.modelXbrl.modelObject(toIndx).qname)
+                    modelObject=[fromModelObject, toModelObject] +
+                                 modelXbrl.relationshipSet(XbrlConst.summationItem)
+                                 .fromToModelObjects(fromModelObject, toModelObject),
+                    conceptFrom=self.modelXbrl.modelObject(fromIndx).qname, conceptTo=self.modelXbrl.modelObject(toIndx).qname)
                 
         for concept, preferredLabels in conceptsUsedWithPreferredLabels.items():
             for preferredLabel in preferredLabels:
@@ -1169,8 +1184,27 @@ class ValidateFiling(ValidateXbrl.ValidateXbrl):
                             modelObject=domainElt, concept=domainElt.qname)
                     
             self.modelXbrl.profileActivity("... SBR role types and type facits checks", minTimeToShow=1.0)
+
+        if self.validateEFM:
+            for pluginXbrlMethod in pluginClassMethods("Validate.EFM.Finally"):
+                pluginXbrlMethod(self)
+        self.modelXbrl.profileActivity("... plug in '.Finally' checks", minTimeToShow=1.0)
+        
         modelXbrl.modelManager.showStatus(_("ready"), 2000)
                     
+    def isStandardUri(self, uri):
+        try:
+            return self._isStandardUri[uri]
+        except KeyError:
+            isStd = (uri in self.disclosureSystem.standardTaxonomiesDict or
+                     (not uri.startswith("http://") and 
+                      # try 2011-12-23 RH: if works, remove the localHrefs
+                      # any(u.endswith(e) for u in (uri.replace("\\","/"),) for e in disclosureSystem.standardLocalHrefs)
+                      "/basis/sbr/" in uri.replace("\\","/")
+                      ))
+            self._isStandardUri[uri] = isStd
+            return isStd
+
     def directedCycle(self, relFrom, origin, fromRelationships):
         if relFrom in fromRelationships:
             for rel in fromRelationships[relFrom]:
@@ -1203,7 +1237,7 @@ class ValidateFiling(ValidateXbrl.ValidateXbrl):
 
     def checkConceptLabels(self, modelXbrl, labelsRelationshipSet, disclosureSystem, concept):
         hasDefaultLangStandardLabel = False
-        dupLabels = set()
+        dupLabels = {}
         for modelLabelRel in labelsRelationshipSet.fromModelObject(concept):
             modelLabel = modelLabelRel.toModelObject
             if modelLabel is not None and modelLabel.xmlLang:
@@ -1214,20 +1248,20 @@ class ValidateFiling(ValidateXbrl.ValidateXbrl):
                 if dupDetectKey in dupLabels:
                     modelXbrl.error(("EFM.6.10.02", "GFM.1.5.2", "SBR.NL.2.2.1.05"),
                         _("Concept %(concept)s has duplicated labels for role %(role)s lang %(lang)s."),
-                        modelObject=concept, concept=concept.qname, 
-                        role=dupDetectKey[0], lang=dupDetectKey[1])
+                        modelObject=(concept, modelLabel, dupLabels[dupDetectKey]), 
+                        concept=concept.qname, role=dupDetectKey[0], lang=dupDetectKey[1])
                 else:
-                    dupLabels.add(dupDetectKey)
+                    dupLabels[dupDetectKey] = modelLabel
                 if modelLabel.role in (XbrlConst.periodStartLabel, XbrlConst.periodEndLabel):
                     modelXbrl.error("SBR.NL.2.3.8.03",
                         _("Concept %(concept)s has label for semantical role %(role)s."),
                         modelObject=modelLabel, concept=concept.qname, role=modelLabel.role)
         if self.validateSBRNL: # check for missing nl labels
-            for role, lang in dupLabels:
+            for role, lang in dupLabels.keys():
                 if role and lang != disclosureSystem.defaultXmlLang and (role,disclosureSystem.defaultXmlLang) not in dupLabels:
                     modelXbrl.error("SBR.NL.2.3.8.05",
                         _("Concept %(concept)s has en but no nl label in role %(role)s."),
-                        modelObject=concept, concept=concept.qname, role=role)
+                        modelObject=(concept,dupLabels[(role,lang)]), concept=concept.qname, role=role)
                 
         #6 10.1 en-US standard label
         if not hasDefaultLangStandardLabel:
@@ -1238,10 +1272,10 @@ class ValidateFiling(ValidateXbrl.ValidateXbrl):
             
         #6 10.3 default lang label for every role
         try:
-            dupLabels.add(("zzzz",disclosureSystem.defaultXmlLang)) #to allow following loop
+            dupLabels[("zzzz",disclosureSystem.defaultXmlLang)] = None #to allow following loop
             priorRole = None
             hasDefaultLang = True
-            for role, lang in sorted(dupLabels):
+            for role, lang in sorted(dupLabels.keys()):
                 if role != priorRole:
                     if not hasDefaultLang:
                         modelXbrl.error(("EFM.6.10.03", "GFM.1.5.3"),

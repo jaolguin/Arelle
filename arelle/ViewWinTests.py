@@ -12,13 +12,15 @@ from arelle import (ViewWinTree, ModelDocument)
 def viewTests(modelXbrl, tabWin):
     view = ViewTests(modelXbrl, tabWin)
     modelXbrl.modelManager.showStatus(_("viewing Tests"))
-    view.treeView["columns"] = ("name", "readMeFirst", "status", "call", "test", "expected", "actual")
+    view.treeView["columns"] = ("name", "readMeFirst", "infoset", "status", "call", "test", "expected", "actual")
     view.treeView.column("#0", width=150, anchor="w")
     view.treeView.heading("#0", text="ID")
     view.treeView.column("name", width=150, anchor="w")
     view.treeView.heading("name", text="Name")
     view.treeView.column("readMeFirst", width=75, anchor="w")
     view.treeView.heading("readMeFirst", text="ReadMeFirst")
+    view.treeView.column("infoset", width=75, anchor="w")
+    view.treeView.heading("infoset", text="Infoset File")
     view.treeView.column("status", width=80, anchor="w")
     view.treeView.heading("status", text="Status")
     view.treeView.column("call", width=150, anchor="w")
@@ -30,6 +32,7 @@ def viewTests(modelXbrl, tabWin):
     view.treeView.column("actual", width=100, anchor="w")
     view.treeView.heading("actual",  text="Actual")
     view.isTransformRegistry = False
+    modelDocument = modelXbrl.modelDocument
     if modelXbrl.modelDocument.type in (ModelDocument.Type.REGISTRY, ModelDocument.Type.REGISTRYTESTCASE):
         if modelXbrl.modelDocument.xmlRootElement.namespaceURI == "http://xbrl.org/2011/conformance-rendering/transforms":
             view.treeView["displaycolumns"] = ("status", "call", "test", "expected", "actual")
@@ -37,13 +40,20 @@ def viewTests(modelXbrl, tabWin):
         else:
             view.treeView["displaycolumns"] = ("name", "readMeFirst", "status", "call", "test", "expected", "actual")
     else:
-        view.treeView["displaycolumns"] = ("name", "readMeFirst", "status", "expected", "actual")
+        # check if infoset needed
+        if modelDocument.type in (ModelDocument.Type.TESTCASESINDEX, ModelDocument.Type.REGISTRY):
+            hasInfoset = any(getattr(refDoc, "outpath", None)  for refDoc in modelDocument.referencesDocument)
+        else:
+            hasInfoset = bool(getattr(modelDocument, "outpath", None))
+        view.treeView["displaycolumns"] = (("name", "readMeFirst") +
+                                           ( ("infoset",) if hasInfoset else () ) +
+                                           ( "status", "expected", "actual"))
         
     menu = view.contextMenu()
     view.menuAddExpandCollapse()
     view.menuAddClipboard()
 
-    view.viewTestcaseIndexElement(modelXbrl.modelDocument, "")
+    view.viewTestcaseIndexElement(modelDocument, "")
     view.blockSelectEvent = 1
     view.blockViewModelObject = 0
     view.treeView.bind("<<TreeviewSelect>>", view.treeviewSelect, '+')
@@ -97,7 +107,10 @@ class ViewTests(ViewWinTree.ViewTree):
         call = modelTestcaseVariation.cfcnCall
         if call: self.treeView.set(node, "call", call[0])
         test = modelTestcaseVariation.cfcnTest
-        if test: self.treeView.set(node, "test", test[0])
+        if test: 
+            self.treeView.set(node, "test", test[0])
+        if getattr(self.modelXbrl.modelDocument, "outpath", None) and modelTestcaseVariation.resultIsInfoset:
+            self.treeView.set(node, "infoset", modelTestcaseVariation.resultInfosetUri)
         self.treeView.set(node, "expected", modelTestcaseVariation.expected)
         self.treeView.set(node, "actual", " ".join(modelTestcaseVariation.actual))
         self.id += 1;

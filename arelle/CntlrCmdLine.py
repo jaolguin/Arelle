@@ -8,14 +8,18 @@ This module is Arelle's controller in command line non-interactive mode
 @author: Mark V Systems Limited
 (c) Copyright 2010 Mark V Systems Limited, All rights reserved.
 '''
+from __future__ import print_function
 from arelle import PythonUtil # define 2.x or 3.x string types
 import gettext, time, datetime, os, shlex, sys, traceback
 from optparse import OptionParser, SUPPRESS_HELP
 from arelle import (Cntlr, FileSource, ModelDocument, XmlUtil, Version,
                     ViewFileDTS, ViewFileFactList, ViewFileFactTable, ViewFileConcepts, 
                     ViewFileFormulae, ViewFileRelationshipSet, ViewFileTests)
+from arelle.ModelValue import qname
 from arelle.Locale import format_string
 from arelle.ModelFormulaObject import FormulaOptions
+from arelle.PluginManager import pluginClassMethods
+from arelle.WebCache import proxyTuple
 import logging
 
 def main():
@@ -25,6 +29,7 @@ def main():
     except ImportError:
         hasWebServer = False
     gettext.install("arelle") # needed for options messages
+    cntlr = CntlrCmdLine()  # need controller for plug ins to be loaded
     usage = "usage: %prog [options]"
     parser = OptionParser(usage, version="Arelle(r) {0}".format(Version.version))
     parser.add_option("-f", "--file", dest="entrypointFile",
@@ -63,6 +68,8 @@ def main():
     parser.add_option("--gfm", action="store", dest="gfmName",
                       help=_("Specify a Global Filer Manual disclosure system name and"
                              " select disclosure system validation."))
+    parser.add_option("--hmrc", action="store_true", dest="validateHMRC",
+                      help=_("Select U.K. HMRC disclosure system validation."))
     parser.add_option("--utr", action="store_true", dest="utrValidate",
                       help=_("Select validation with respect to Unit Type Registry."))
     parser.add_option("--labelLang", action="store", dest="labelLang",
@@ -89,9 +96,12 @@ def main():
                       help=_("Write formulae linkbase into FILE"))
     parser.add_option("--testReport", "--csvTestReport", action="store", dest="testReport",
                       help=_("Write test report of validation (of test cases) into FILE"))
+    parser.add_option("--testReportCols", action="store", dest="testReportCols",
+                      help=_("Columns for test report file"))
     parser.add_option("--logFile", action="store", dest="logFile",
                       help=_("Write log messages into file, otherwise they go to standard output.  " 
                              "If file ends in .xml it is xml-formatted, otherwise it is text. "))
+    parser.add_option("--parameters", action="store", dest="parameters", help=_("Specify parameters for formula and validation (name=value[,name=value])."))
     parser.add_option("--formulaParamExprResult", action="store_true", dest="formulaParamExprResult", help=_("Specify formula tracing."))
     parser.add_option("--formulaParamInputValue", action="store_true", dest="formulaParamInputValue", help=_("Specify formula tracing."))
     parser.add_option("--formulaCallExprSource", action="store_true", dest="formulaCallExprSource", help=_("Specify formula tracing."))
@@ -109,9 +119,23 @@ def main():
     parser.add_option("--formulaVarExpressionResult", action="store_true", dest="formulaVarExpressionResult", help=_("Specify formula tracing."))
     parser.add_option("--formulaVarFilterWinnowing", action="store_true", dest="formulaVarFilterWinnowing", help=_("Specify formula tracing."))
     parser.add_option("--formulaVarFiltersResult", action="store_true", dest="formulaVarFiltersResult", help=_("Specify formula tracing."))
+    parser.add_option("--proxy", action="store", dest="proxy",
+                      help=_("Modify and re-save proxy settings configuration.  " 
+                             "Enter 'system' to use system proxy setting, 'none' to use no proxy, "
+                             "'http://[user[:password]@]host[:port]' "
+                             " (e.g., http://192.168.1.253, http://example.com:8080, http://joe:secret@example.com:8080), "
+                             " or 'show' to show current setting, ." ))
+    parser.add_option("--plugins", action="store", dest="plugins",
+                      help=_("Modify and re-save plug-in configuration.  " 
+                             "Enter 'show' to show current plug-in configuration, or '|' separated modules: "
+                             "+url to add plug-in by its url or filename, ~name to reload a plug-in by its name, -name to remove a plug-in by its name, "
+                             " (e.g., '+http://arelle.org/files/hello_web.py', '+C:\Program Files\Arelle\examples\plugin\hello_dolly.py' to load, "
+                             "~Hello Dolly to reload, -Hello Dolly to remove)" ))
     if hasWebServer:
         parser.add_option("--webserver", action="store", dest="webserver",
                           help=_("start web server on host:port for REST and web access, e.g., --webserver locahost:8080."))
+    for optionsExtender in pluginClassMethods("CntlrCmdLine.Options"):
+        optionsExtender(parser)
     parser.add_option("-a", "--about",
                       action="store_true", dest="about",
                       help=_("Show product version, copyright, and license."))
@@ -145,11 +169,13 @@ def main():
                 "{1}"
                 ).format(Version.version,
                          _("\n   Bottle (c) 2011 Marcel Hellkamp") if hasWebServer else ""))
-    elif len(args) != 0 or (options.entrypointFile is None and (not hasWebServer or options.webserver is None)):
+    elif len(args) != 0 or (options.entrypointFile is None and 
+                            ((not options.proxy) and (not options.plugins)
+                             and (not hasWebServer or options.webserver is None))):
         parser.error(_("incorrect arguments, please try\n  python CntlrCmdLine.pyw --help"))
     elif hasWebServer and options.webserver:
         if any((options.entrypointFile, options.importFiles, options.diffFile, options.versReportFile,
-                options.validate, options.calcDecimals, options.calcPrecision, options.validateEFM, options.gfmName,
+                options.validate, options.calcDecimals, options.calcPrecision, options.validateEFM, options.validateHMRC, options.gfmName,
                 options.utrValidate, options.DTSFile, options.factsFile, options.factListCols, options.factTableFile,
                 options.conceptsFile, options.preFile, options.calFile, options.dimFile, options.formulaeFile,
                 options.logFile, options.formulaParamExprResult, options.formulaParamInputValue,
@@ -157,24 +183,90 @@ def main():
                 options.formulaCallExprResult, options.formulaVarSetExprEval, options.formulaVarSetExprResult,
                 options.formulaAsserResultCounts, options.formulaFormulaRules, options.formulaVarsOrder,
                 options.formulaVarExpressionSource, options.formulaVarExpressionCode, options.formulaVarExpressionEvaluation,
-                options.formulaVarExpressionResult, options.formulaVarFiltersResult)):
+                options.formulaVarExpressionResult, options.formulaVarFiltersResult,
+                options.proxy, options.plugins)):
             parser.error(_("incorrect arguments with --webserver, please try\n  python CntlrCmdLine.pyw --help"))
         else:
             from arelle import CntlrWebMain
-            CntlrWebMain.startWebserver(CntlrCmdLine(logFileName='logToBuffer'), options)
+            cntlr.startLogging(logFileName='logToBuffer')
+            CntlrWebMain.startWebserver(cntlr, options)
     else:
         # parse and run the FILENAME
-        CntlrCmdLine(logFileName=options.logFile).run(options)
+        cntlr.startLogging(logFileName=options.logFile if options.logFile else "logToPrint",
+                           logFormat="[%(messageCode)s] %(message)s - %(file)s")
+        cntlr.run(options)
         
 class CntlrCmdLine(Cntlr.Cntlr):
 
     def __init__(self, logFileName=None):
-        super(CntlrCmdLine, self).__init__(logFileName=logFileName if logFileName else "logToPrint",
-                         logFormat="[%(messageCode)s] %(message)s - %(file)s")
+        super(CntlrCmdLine, self).__init__()
         
-    def run(self, options):
+    def run(self, options, sourceZipStream=None):
+        if options.proxy:
+            if options.proxy != "show":
+                proxySettings = proxyTuple(options.proxy)
+                self.webCache.resetProxies(proxySettings)
+                self.config["proxySettings"] = proxySettings
+                self.saveConfig()
+                self.addToLog(_("Proxy configuration has been set."), messageCode="info")
+            useOsProxy, urlAddr, urlPort, user, password = self.config["proxySettings"]
+            if useOsProxy:
+                self.addToLog(_("Proxy configured to use {0}.").format(
+                    _('Microsoft Windows Internet Settings') if sys.platform.startswith("win")
+                    else (_('Mac OS X System Configuration') if sys.platform in ("darwin", "macos")
+                          else _('environment variables'))), messageCode="info")
+            elif urlAddr:
+                self.addToLog(_("Proxy setting: http://{0}{1}{2}{3}{4}").format(
+                    user if user else "",
+                    ":****" if password else "",
+                    "@" if (user or password) else "",
+                    urlAddr,
+                    ":{0}".format(urlPort) if urlPort else ""), messageCode="info")
+            else:
+                self.addToLog(_("Proxy is disabled."), messageCode="info")
+        if options.plugins:
+            from arelle import PluginManager
+            resetPlugins = False
+            for pluginCmd in options.plugins.split('|'):
+                cmd = pluginCmd.strip()
+                if cmd != "show":
+                    if cmd.startswith("+"):
+                        moduleInfo = PluginManager.addPluginModule(cmd[1:])
+                        if moduleInfo:
+                            self.addToLog(_("Addition of plug-in {0} successful.").format(moduleInfo.get("name")), 
+                                          messageCode="info", file=moduleInfo.get("moduleURL"))
+                            resetPlugins = True
+                        else:
+                            self.addToLog(_("Unable to load plug-in."), messageCode="info", file=cmd[1:])
+                    elif cmd.startswith("~"):
+                        if PluginManager.reloadPluginModule(cmd[1:]):
+                            self.addToLog(_("Reload of plug-in successful."), messageCode="info", file=cmd[1:])
+                            resetPlugins = True
+                        else:
+                            self.addToLog(_("Unable to reload plug-in."), messageCode="info", file=cmd[1:])
+                    elif cmd.startswith("-"):
+                        if PluginManager.removePluginModule(cmd[1:]):
+                            self.addToLog(_("Deletion of plug-in successful."), messageCode="info", file=cmd[1:])
+                            resetPlugins = True
+                        else:
+                            self.addToLog(_("Unable to delete plug-in."), messageCode="info", file=cmd[1:])
+                    else:
+                        self.addToLog(_("Plug-in action not recognized (may need +uri or [~-]module."), messageCode="info", file=cmd)
+                if resetPlugins:
+                    PluginManager.reset()
+                    PluginManager.save(self)
+            self.addToLog(_("Plug-in modules:"), messageCode="info")
+            for i, moduleItem in enumerate(sorted(PluginManager.pluginConfig.get("modules", {}).items())):
+                moduleInfo = moduleItem[1]
+                self.addToLog(_("Plug-in: {0}; author: {1}; version: {2}; status: {3}; date: {4}; description: {5}; license {6}.").format(
+                              moduleItem[0], moduleInfo.get("author"), moduleInfo.get("version"), moduleInfo.get("status"),
+                              moduleInfo.get("fileDate"), moduleInfo.get("description"), moduleInfo.get("license")),
+                              messageCode="info", file=moduleInfo.get("moduleURL"))
+        if options.proxy or options.plugins:
+            if not options.entrypointFile:
+                return True # success
         self.entrypointFile = options.entrypointFile
-        filesource = FileSource.openFileSource(self.entrypointFile,self)
+        filesource = FileSource.openFileSource(self.entrypointFile, self, sourceZipStream)
         if options.validateEFM:
             if options.gfmName:
                 self.addToLog(_("both --efm and --gfm validation are requested, proceeding with --efm only"),
@@ -184,6 +276,9 @@ class CntlrCmdLine(Cntlr.Cntlr):
         elif options.gfmName:
             self.modelManager.validateDisclosureSystem = True
             self.modelManager.disclosureSystem.select(options.gfmName)
+        elif options.validateHMRC:
+            self.modelManager.validateDisclosureSystem = True
+            self.modelManager.disclosureSystem.select("hmrc")
         else:
             self.modelManager.disclosureSystem.select(None) # just load ordinary mappings
         if options.calcDecimals:
@@ -198,6 +293,10 @@ class CntlrCmdLine(Cntlr.Cntlr):
         if options.utrValidate:
             self.modelManager.validateUtr = True
         fo = FormulaOptions()
+        if options.parameters:
+            fo.parameterValues = dict(((qname(key, noPrefixIsNoNamespace=True),(None,value)) 
+                                       for param in options.parameters.split(',') 
+                                       for key,sep,value in (param.partition('='),) ) )   
         if options.formulaParamExprResult:
             fo.traceParameterExpressionResult = True
         if options.formulaParamInputValue:
@@ -237,10 +336,15 @@ class CntlrCmdLine(Cntlr.Cntlr):
         startedAt = time.time()
         modelDiffReport = None
         success = True
-        modelXbrl = self.modelManager.load(filesource, _("views loading"))
-        if modelXbrl.errors:
+        modelXbrl = None
+        try:
+            modelXbrl = self.modelManager.load(filesource, _("views loading"))
+        except Exception as err:
+            self.addToLog(_("[Exception] Failed to complete request: \n{0} \n{1}").format(
+                        err,
+                        traceback.format_tb(sys.exc_info()[2])))
             success = False    # loading errors, don't attempt to utilize loaded DTS
-        else:
+        if modelXbrl and modelXbrl.modelDocument:
             self.addToLog(format_string(self.modelManager.locale, 
                                         _("loaded in %.2f secs at %s"), 
                                         (time.time() - startedAt, timeNow)), 
@@ -254,6 +358,8 @@ class CntlrCmdLine(Cntlr.Cntlr):
                                                 messageCode="info", file=importFile)
                 if modelXbrl.errors:
                     success = False    # loading errors, don't attempt to utilize loaded DTS
+        else:
+            success = False
         if success and options.diffFile and options.versReportFile:
             diffFilesource = FileSource.FileSource(options.diffFile,self)
             startedAt = time.time()
@@ -282,12 +388,12 @@ class CntlrCmdLine(Cntlr.Cntlr):
                                                 _("validated in %.2f secs"), 
                                                 time.time() - startedAt),
                                                 messageCode="info", file=self.entrypointFile)
-                    if (options.testReport and 
-                        self.modelManager.modelXbrl.modelDocument.type in 
-                            (ModelDocument.Type.TESTCASESINDEX, 
-                             ModelDocument.Type.TESTCASE, 
-                             ModelDocument.Type.REGISTRY)):
-                        ViewFileTests.viewTests(self.modelManager.modelXbrl, options.testReport)
+                if (options.testReport and 
+                    self.modelManager.modelXbrl.modelDocument.type in 
+                        (ModelDocument.Type.TESTCASESINDEX, 
+                         ModelDocument.Type.TESTCASE, 
+                         ModelDocument.Type.REGISTRY)):
+                    ViewFileTests.viewTests(self.modelManager.modelXbrl, options.testReport, options.testReportCols)
                     
                 if options.DTSFile:
                     ViewFileDTS.viewDTS(modelXbrl, options.DTSFile)
@@ -305,6 +411,9 @@ class CntlrCmdLine(Cntlr.Cntlr):
                     ViewFileRelationshipSet.viewRelationshipSet(modelXbrl, options.dimFile, "Dimensions", "XBRL-dimensions", labelrole=options.labelRole, lang=options.labelLang)
                 if options.formulaeFile:
                     ViewFileFormulae.viewFormulae(modelXbrl, options.formulaeFile, "Formulae", lang=options.labelLang)
+                for pluginXbrlMethod in pluginClassMethods("CntlrCmdLine.Xbrl.Run"):
+                    pluginXbrlMethod(self, options, modelXbrl)
+                                        
             except (IOError, EnvironmentError) as err:
                 self.addToLog(_("[IOError] Failed to save output:\n {0}").format(err))
                 success = False

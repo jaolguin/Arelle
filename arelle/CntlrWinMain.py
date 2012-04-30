@@ -7,33 +7,35 @@ This module is Arelle's controller in windowing interactive UI mode
 (c) Copyright 2010 Mark V Systems Limited, All rights reserved.
 '''
 from arelle import PythonUtil # define 2.x or 3.x string types
-import os, subprocess, pickle, time, locale, re
-from tkinter import *
+import os, sys, subprocess, pickle, time, locale, re
+from tkinter import (Tk, TclError, Toplevel, Menu, PhotoImage, StringVar, BooleanVar, N, S, E, W, EW, 
+                     HORIZONTAL, VERTICAL, END)
+from tkinter.ttk import Frame, Button, Label, Combobox, Separator, PanedWindow, Notebook
 import tkinter.tix
-from tkinter.ttk import *
 import tkinter.filedialog
 import tkinter.messagebox, traceback
 from arelle.Locale import format_string
 from arelle.CntlrWinTooltip import ToolTip
 from arelle import XbrlConst
+from arelle.PluginManager import pluginClassMethods
 import logging
 
 import threading, queue
 
 from arelle import Cntlr
-from arelle import (DialogURL, 
-                ModelDocument,
-                ModelManager,
-                ViewWinDTS,
-                ViewWinProperties, ViewWinConcepts, ViewWinRelationshipSet, ViewWinFormulae,
-                ViewWinFactList, ViewWinFactTable, ViewWinRenderedGrid, ViewWinXml,
-                ViewWinTests, ViewWinVersReport, ViewWinRssFeed,
-                ViewFileTests,
-                ViewFileRenderedGrid,
-                Updater
-               )
+from arelle import (DialogURL, DialogLanguage,
+                    DialogPluginManager,
+                    ModelDocument,
+                    ModelManager,
+                    ViewWinDTS,
+                    ViewWinProperties, ViewWinConcepts, ViewWinRelationshipSet, ViewWinFormulae,
+                    ViewWinFactList, ViewWinFactTable, ViewWinRenderedGrid, ViewWinXml,
+                    ViewWinTests, ViewWinVersReport, ViewWinRssFeed,
+                    ViewFileTests,
+                    ViewFileRenderedGrid,
+                    Updater
+                   )
 from arelle.ModelFormulaObject import FormulaOptions
-from arelle.ModelRssItem import RssWatchOptions
 from arelle.FileSource import openFileSource
 
 restartMain = True
@@ -46,8 +48,8 @@ class CntlrWinMain (Cntlr.Cntlr):
         self.parent = parent
         self.filename = None
         self.dirty = False
-        overrideLang = self.config.get("overrideLang")
-        self.lang = overrideLang if overrideLang else self.modelManager.defaultLang
+        overrideLang = self.config.get("labelLangOverride")
+        self.labelLang = overrideLang if overrideLang else self.modelManager.defaultLang
         self.data = {}
         
         imgpath = self.imagesDir + os.sep
@@ -114,6 +116,8 @@ class CntlrWinMain (Cntlr.Cntlr):
         self.validateUtr = BooleanVar(value=self.modelManager.validateUtr)
         self.validateUtr.trace("w", self.setValidateUtr)
         validateMenu.add_checkbutton(label=_("Unit Type Registry validation"), underline=0, variable=self.validateUtr, onvalue=True, offvalue=False)
+        for pluginMenuExtender in pluginClassMethods("CntlrWinMain.Menu.Validation"):
+            pluginMenuExtender(self, validateMenu)
 
         formulaMenu = Menu(self.menubar, tearoff=0)
         formulaMenu.add_command(label=_("Parameters..."), underline=0, command=self.formulaParametersDialog)
@@ -130,7 +134,7 @@ class CntlrWinMain (Cntlr.Cntlr):
         rssWatchMenu.add_command(label=_("Stop"), underline=0, command=lambda: self.rssWatchControl(stop=True))
 
         toolsMenu.add_cascade(label=_("RSS Watch"), menu=rssWatchMenu, underline=0)
-        self.modelManager.rssWatchOptions = self.config.setdefault("rssWatchOptions",RssWatchOptions())
+        self.modelManager.rssWatchOptions = self.config.setdefault("rssWatchOptions", {})
 
         toolsMenu.add_cascade(label=_("Internet"), menu=cacheMenu, underline=0)
         self.webCache.workOffline  = self.config.setdefault("workOffline",False)
@@ -146,13 +150,16 @@ class CntlrWinMain (Cntlr.Cntlr):
         logmsgMenu.add_command(label=_("Clear"), underline=0, command=self.logClear)
         logmsgMenu.add_command(label=_("Save to file"), underline=0, command=self.logSaveToFile)
 
-        toolsMenu.add_cascade(label=_("Language..."), underline=0, command=self.languagesDialog)
-
+        toolsMenu.add_command(label=_("Language..."), underline=0, command=lambda: DialogLanguage.askLanguage(self))
+        
+        for pluginMenuExtender in pluginClassMethods("CntlrWinMain.Menu.Tools"):
+            pluginMenuExtender(self, toolsMenu)
         self.menubar.add_cascade(label=_("Tools"), menu=toolsMenu, underline=0)
 
         helpMenu = Menu(self.menubar, tearoff=0)
         for label, command, shortcut_text, shortcut in (
                 (_("Check for updates"), lambda: Updater.checkForUpdates(self), None, None),
+                (_("Manage plug-ins"), lambda: DialogPluginManager.dialogPluginManager(self), None, None),
                 (None, None, None, None),
                 (_("About..."), self.helpAbout, None, None),
                 ):
@@ -161,6 +168,8 @@ class CntlrWinMain (Cntlr.Cntlr):
             else:
                 helpMenu.add_command(label=label, underline=0, command=command, accelerator=shortcut_text)
                 self.parent.bind(shortcut, command)
+        for pluginMenuExtender in pluginClassMethods("CntlrWinMain.Menu.Help"):
+            pluginMenuExtender(self, toolsMenu)
         self.menubar.add_cascade(label=_("Help"), menu=helpMenu, underline=0)
 
         windowFrame = Frame(self.parent)
@@ -210,6 +219,8 @@ class CntlrWinMain (Cntlr.Cntlr):
             else:
                 ToolTip(tbControl, text=toolTip)
             menubarColumn += 1
+        for toolbarExtender in pluginClassMethods("CntlrWinMain.Toolbar"):
+            toolbarExtender(self, toolbar)
         toolbar.grid(row=0, column=0, sticky=(N, W))
 
         paneWinTopBtm = PanedWindow(windowFrame, orient=VERTICAL)
@@ -372,7 +383,7 @@ class CntlrWinMain (Cntlr.Cntlr):
                     if not filename:
                         return False
                     try:
-                        ViewFileRenderedGrid.viewRenderedGrid(modelXbrl, filename, lang=self.lang, sourceView=view)
+                        ViewFileRenderedGrid.viewRenderedGrid(modelXbrl, filename, lang=self.labelLang, sourceView=view)
                     except (IOError, EnvironmentError) as err:
                         tkinter.messagebox.showwarning(_("arelle - Error"),
                                         _("Failed to save {0}:\n{1}").format(
@@ -524,7 +535,7 @@ class CntlrWinMain (Cntlr.Cntlr):
     def webOpen(self, *ignore):
         if not self.okayToContinue():
             return
-        url = DialogURL.askURL(self.parent)
+        url = DialogURL.askURL(self.parent, buttonSEC=True, buttonRSS=True)
         if url:
             self.updateFileHistory(url, False)
             filesource = openFileSource(url,self)
@@ -586,7 +597,7 @@ class CntlrWinMain (Cntlr.Cntlr):
                 currentAction = "view of versioning report"
                 ViewWinVersReport.viewVersReport(modelXbrl, self.tabWinTopRt)
                 from arelle.ViewWinDiffs import ViewWinDiffs
-                ViewWinDiffs(modelXbrl, self.tabWinBtm, lang=self.lang)
+                ViewWinDiffs(modelXbrl, self.tabWinBtm, lang=self.labelLang)
             elif modelXbrl.modelDocument.type == ModelDocument.Type.RSSFEED:
                 currentAction = "view of RSS feed"
                 ViewWinRssFeed.viewRssFeed(modelXbrl, self.tabWinTopRt)
@@ -594,32 +605,32 @@ class CntlrWinMain (Cntlr.Cntlr):
                 currentAction = "tree view of tests"
                 ViewWinDTS.viewDTS(modelXbrl, self.tabWinTopLeft, altTabWin=self.tabWinTopRt)
                 currentAction = "view of concepts"
-                ViewWinConcepts.viewConcepts(modelXbrl, self.tabWinBtm, "Concepts", lang=self.lang, altTabWin=self.tabWinTopRt)
+                ViewWinConcepts.viewConcepts(modelXbrl, self.tabWinBtm, "Concepts", lang=self.labelLang, altTabWin=self.tabWinTopRt)
                 if modelXbrl.hasTableRendering:  # show rendering grid even without any facts
-                    ViewWinRenderedGrid.viewRenderedGrid(modelXbrl, self.tabWinTopRt, lang=self.lang)
+                    ViewWinRenderedGrid.viewRenderedGrid(modelXbrl, self.tabWinTopRt, lang=self.labelLang)
                     if topView is None: topView = modelXbrl.views[-1]
                 if modelXbrl.modelDocument.type in (ModelDocument.Type.INSTANCE, ModelDocument.Type.INLINEXBRL):
                     currentAction = "table view of facts"
                     if not modelXbrl.hasTableRendering: # table view only if not grid rendered view
-                        ViewWinFactTable.viewFacts(modelXbrl, self.tabWinTopRt, lang=self.lang)
+                        ViewWinFactTable.viewFacts(modelXbrl, self.tabWinTopRt, lang=self.labelLang)
                         if topView is None: topView = modelXbrl.views[-1]
                     currentAction = "tree/list of facts"
-                    ViewWinFactList.viewFacts(modelXbrl, self.tabWinTopRt, lang=self.lang)
+                    ViewWinFactList.viewFacts(modelXbrl, self.tabWinTopRt, lang=self.labelLang)
                     if topView is None: topView = modelXbrl.views[-1]
                 if modelXbrl.hasFormulae:
                     currentAction = "formulae view"
                     ViewWinFormulae.viewFormulae(modelXbrl, self.tabWinTopRt)
                     if topView is None: topView = modelXbrl.views[-1]
                 currentAction = "presentation linkbase view"
-                ViewWinRelationshipSet.viewRelationshipSet(modelXbrl, self.tabWinTopRt, XbrlConst.parentChild, lang=self.lang)
+                ViewWinRelationshipSet.viewRelationshipSet(modelXbrl, self.tabWinTopRt, XbrlConst.parentChild, lang=self.labelLang)
                 if topView is None: topView = modelXbrl.views[-1]
                 currentAction = "calculation linkbase view"
-                ViewWinRelationshipSet.viewRelationshipSet(modelXbrl, self.tabWinTopRt, XbrlConst.summationItem, lang=self.lang)
+                ViewWinRelationshipSet.viewRelationshipSet(modelXbrl, self.tabWinTopRt, XbrlConst.summationItem, lang=self.labelLang)
                 currentAction = "dimensions relationships view"
-                ViewWinRelationshipSet.viewRelationshipSet(modelXbrl, self.tabWinTopRt, "XBRL-dimensions", lang=self.lang)
+                ViewWinRelationshipSet.viewRelationshipSet(modelXbrl, self.tabWinTopRt, "XBRL-dimensions", lang=self.labelLang)
                 if modelXbrl.hasTableRendering:
                     currentAction = "rendering view"
-                    ViewWinRelationshipSet.viewRelationshipSet(modelXbrl, self.tabWinTopRt, "Table-rendering", lang=self.lang)
+                    ViewWinRelationshipSet.viewRelationshipSet(modelXbrl, self.tabWinTopRt, "Table-rendering", lang=self.labelLang)
             currentAction = "property grid"
             ViewWinProperties.viewProperties(modelXbrl, self.tabWinTopLeft)
             currentAction = "log view creation time"
@@ -760,8 +771,11 @@ class CntlrWinMain (Cntlr.Cntlr):
                 self.config["windowGeometry"] = self.parent.geometry()
             if state in ("normal", "zoomed"):
                 self.config["windowState"] = state
-            self.config["tabWinTopLeftSize"] = (self.tabWinTopLeft.winfo_width() - 4,   # remove border growth
-                                                self.tabWinTopLeft.winfo_height() - 6)
+            if self.isMSW: adjustW = 4; adjustH = 6  # tweak to prevent splitter regions from growing on reloading
+            elif self.isMac: adjustW = 54; adjustH = 39
+            else: adjustW = 2; adjustH = 2  # linux (tested on ubuntu)
+            self.config["tabWinTopLeftSize"] = (self.tabWinTopLeft.winfo_width() - adjustW,
+                                                self.tabWinTopLeft.winfo_height() - adjustH)
             super(CntlrWinMain, self).close(saveConfig=True)
             self.parent.unbind_all(())
             self.parent.destroy()
@@ -831,7 +845,7 @@ class CntlrWinMain (Cntlr.Cntlr):
     def rssWatchControl(self, start=False, stop=False, close=False):
         from arelle.ModelDocument import Type
         from arelle import WatchRss
-        if not self.modelManager.rssWatchOptions.feedSourceUri:
+        if not self.modelManager.rssWatchOptions.get("feedSourceUri"):
             tkinter.messagebox.showwarning(_("RSS Watch Control Error"),
                                 _("RSS Feed is not set up, please select options and select feed"),
                                 parent=self.parent)
@@ -839,13 +853,13 @@ class CntlrWinMain (Cntlr.Cntlr):
         rssModelXbrl = None
         for loadedModelXbrl in self.modelManager.loadedModelXbrls:
             if (loadedModelXbrl.modelDocument.type == Type.RSSFEED and
-                loadedModelXbrl.modelDocument.uri == self.modelManager.rssWatchOptions.feedSourceUri):
+                loadedModelXbrl.modelDocument.uri == self.modelManager.rssWatchOptions.get("feedSourceUri")):
                 rssModelXbrl = loadedModelXbrl
                 break                
         #not loaded
         if start:
             if not rssModelXbrl:
-                rssModelXbrl = self.modelManager.create(Type.RSSFEED, self.modelManager.rssWatchOptions.feedSourceUri)
+                rssModelXbrl = self.modelManager.create(Type.RSSFEED, self.modelManager.rssWatchOptions.get("feedSourceUri"))
                 self.showLoadedXbrl(rssModelXbrl, False)
             if not hasattr(rssModelXbrl,"watchRss"):
                 WatchRss.initializeWatcher(rssModelXbrl)
@@ -861,7 +875,7 @@ class CntlrWinMain (Cntlr.Cntlr):
     # ui thread addToLog
     def uiRssWatchUpdateOption(self, latestPubDate): 
         if latestPubDate:
-            self.modelManager.rssWatchOptions.latestPubDate = latestPubDate
+            self.modelManager.rssWatchOptions["latestPubDate"] = latestPubDate
         self.config["rssWatchOptions"] = self.modelManager.rssWatchOptions
         self.saveConfig()
     
@@ -876,7 +890,7 @@ class CntlrWinMain (Cntlr.Cntlr):
                 self.modelManager.defaultLang, override),
                 parent=self.parent)
         if newValue is not None:
-            self.config["langOverride"] = newValue
+            self.config["labelLangOverride"] = newValue
             if newValue:
                 self.lang = newValue
             else:
@@ -910,7 +924,7 @@ class CntlrWinMain (Cntlr.Cntlr):
                     v = _("Validate {0}\nCheck disclosure system rules\n{1}{2}{3}").format(
                            valName, self.modelManager.disclosureSystem.selection,c,u)
                 else:
-                    v = _("Validate {0}{0}{1}").format(valName, c,u)
+                    v = _("Validate {0}{1}{2}").format(valName, c, u)
         else:
             v = _("Validate")
         self.validateTooltipText.set(v)
@@ -1061,13 +1075,13 @@ class CntlrWinMain (Cntlr.Cntlr):
                 callback(*args)
         widget.after(delayMsecs, lambda: self.uiThreadChecker(widget))
         
-    def uiFileDialog(self, action, title=None, initialdir=None, filetypes=[], defaultextension=None):
+    def uiFileDialog(self, action, title=None, initialdir=None, filetypes=[], defaultextension=None, owner=None):
         if self.hasWin32gui:
             import win32gui
             try:
                 filename, filter, flags = {"open":win32gui.GetOpenFileNameW,
                                            "save":win32gui.GetSaveFileNameW}[action](
-                            hwndOwner=self.parent.winfo_id(), 
+                            hwndOwner=(owner if owner else self.parent).winfo_id(), 
                             hInstance=win32gui.GetModuleHandle(None),
                             Filter='\0'.join(e for t in filetypes+['\0'] for e in t),
                             MaxFile=4096,

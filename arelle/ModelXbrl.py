@@ -12,6 +12,7 @@ from arelle.FileSource import FileNamedStringIO
 from arelle.ModelObject import ModelObject
 from arelle.Locale import format_string
 from arelle.PrototypeInstanceObject import FactPrototype
+from arelle.ValidateXbrlDimensions import isFactDimensionallyValid
 ModelRelationshipSet = None # dynamic import
 
 AUTO_LOCATE_ELEMENT = '771407c0-1d0c-11e1-be5e-028037ec0200' # singleton meaning choose best location for new element
@@ -90,7 +91,7 @@ class ModelXbrl:
         self.relationshipSets = {} # contains ModelRelationshipSets by bas set keys
         self.qnameDimensionDefaults = {} # contains qname of dimension (index) and default member(value)
         self.facts = []
-        self.factsInInstance = []
+        self.factsInInstance = set()
         self.contexts = {}
         self.units = {}
         self.modelObjects = []
@@ -222,7 +223,7 @@ class ModelXbrl:
                     return c
         return None
                  
-    def createContext(self, entityIdentScheme, entityIdentValue, periodType, periodStart, periodEndInstant, dims, segOCCs, scenOCCs,
+    def createContext(self, entityIdentScheme, entityIdentValue, periodType, periodStart, periodEndInstant, priItem, dims, segOCCs, scenOCCs,
                       afterSibling=None, beforeSibling=None):
         xbrlElt = self.modelDocument.xmlRootElement
         if afterSibling == AUTO_LOCATE_ELEMENT:
@@ -248,16 +249,27 @@ class ModelXbrl:
         segmentElt = None
         scenarioElt = None
         from arelle.ModelInstanceObject import ModelDimensionValue
-        if dims:
-            for dimQname in sorted(dims.keys()):
-                dimValue = dims[dimQname]
-                if isinstance(dimValue, ModelDimensionValue):
-                    if dimValue.isExplicit: 
-                        dimMemberQname = dimValue.memberQname
+        if dims: # requires primary item to determin ambiguous concepts
+            ''' in theory we have to check full set of dimensions for validity in source or any other
+                context element, but for shortcut will see if each dimension is already reported in an
+                unambiguous valid contextElement
+            '''
+            from arelle.PrototypeInstanceObject import FactPrototype, ContextPrototype, DimValuePrototype
+            fp = FactPrototype(self, priItem, dims.items())
+            # force trying a valid prototype's context Elements
+            if not isFactDimensionallyValid(self, fp, setPrototypeContextElements=True):
+                self.info("arelleLinfo",
+                    _("Create context for %(priItem)s, cannot determine valid context elements, no suitable hypercubes"), 
+                    modelObject=self, priItem=priItem)
+            fpDims = fp.context.qnameDims
+            for dimQname in sorted(fpDims.keys()):
+                dimValue = fpDims[dimQname]
+                if isinstance(dimValue, DimValuePrototype):
+                    dimMemberQname = dimValue.memberQname  # None if typed dimension
                     contextEltName = dimValue.contextElement
                 else: # qname for explicit or node for typed
-                    dimMemberQname = dimValue
-                    contextEltName = self.qnameDimensionContextElement.get(dimQname)
+                    dimMemberQname = None
+                    contextEltName = None
                 if contextEltName == "segment":
                     if segmentElt is None: 
                         segmentElt = XmlUtil.addChild(entityElt, XbrlConst.xbrli, "segment")
@@ -276,8 +288,8 @@ class ModelXbrl:
                 if dimConcept.isTypedDimension:
                     dimElt = XmlUtil.addChild(contextElt, XbrlConst.xbrldi, "xbrldi:typedMember", 
                                               attributes=dimAttr)
-                    if isinstance(dimValue, ModelDimensionValue) and dimValue.isTyped:
-                        XmlUtil.copyChildren(dimElt, dimValue)
+                    if isinstance(dimValue, (ModelDimensionValue, DimValuePrototype)) and dimValue.isTyped:
+                        XmlUtil.copyNodes(dimElt, dimValue.typedMember) 
                 elif dimMemberQname:
                     dimElt = XmlUtil.addChild(contextElt, XbrlConst.xbrldi, "xbrldi:explicitMember",
                                               attributes=dimAttr,
@@ -326,6 +338,50 @@ class ModelXbrl:
         XmlValidate.validate(self, newUnitElt)
         return newUnitElt
     
+    @property
+    def nonNilFactsInInstance(self): # indexed by fact (concept) qname
+        try:
+            return self._nonNilFactsInInstance
+        except AttributeError:
+            self._nonNilFactsInInstance = set(f for f in self.factsInInstance if not f.isNil)
+            return self._nonNilFactsInInstance
+        
+    @property
+    def factsByQname(self): # indexed by fact (concept) qname
+        try:
+            return self._factsByQname
+        except AttributeError:
+            self._factsByQname = fbqn = defaultdict(set)
+            for f in self.factsInInstance: fbqn[f.qname].add(f)
+            return fbqn
+        
+    def factsByDatatype(self, notStrict, typeQname): # indexed by fact (concept) qname
+        try:
+            return self._factsByDatatype[notStrict, typeQname]
+        except AttributeError:
+            self._factsByDatatype = {}
+            return self.factsByDatatype(notStrict, typeQname)
+        except KeyError:
+            self._factsByDatatype[notStrict, typeQname] = fbdt = set()
+            for f in self.factsInInstance:
+                c = f.concept
+                if c.typeQname == typeQname or (notStrict and c.type.isDerivedFrom(typeQname)):
+                    fbdt.add(f)
+            return fbdt
+        
+    def factsByPeriodType(self, periodType): # indexed by fact (concept) qname
+        try:
+            return self._factsByPeriodType[periodType]
+        except AttributeError:
+            self._factsByPeriodType = fbpt = defaultdict(set)
+            for f in self.factsInInstance:
+                p = f.concept.periodType
+                if p:
+                    fbpt[p].add(f)
+            return self.factsByPeriodType(periodType)
+        except KeyError:
+            return set()  # no facts for this period type
+        
     def matchFact(self, otherFact):
         for fact in self.facts:
             if (fact.isTuple):
@@ -378,7 +434,8 @@ class ModelXbrl:
         # determine logCode
         messageCode = None
         for argCode in codes if isinstance(codes,tuple) else (codes,):
-            if ((self.modelManager.disclosureSystem.EFM and argCode.startswith("EFM")) or
+            if (isinstance(argCode, ModelValue.QName) or
+                (self.modelManager.disclosureSystem.EFM and argCode.startswith("EFM")) or
                 (self.modelManager.disclosureSystem.GFM and argCode.startswith("GFM")) or
                 (self.modelManager.disclosureSystem.HMRC and argCode.startswith("HMRC")) or
                 (self.modelManager.disclosureSystem.SBRNL and argCode.startswith("SBR.NL")) or
@@ -395,16 +452,19 @@ class ModelXbrl:
                     entryUrl = self.modelDocument.uri
                 except AttributeError:
                     entryUrl = self.entryLoadingUrl
-                try:
-                    objectUrl = argValue.modelDocument.uri
-                except AttributeError:
-                    try:
-                        objectUrl = self.modelDocument.uri
-                    except AttributeError:
-                        objectUrl = self.entryLoadingUrl
                 refs = []
                 for arg in (argValue if isinstance(argValue, (tuple,list)) else (argValue,)):
                     if arg is not None:
+                        if isinstance(arg, _STR_BASE):
+                            objectUrl = arg
+                        else:
+                            try:
+                                objectUrl = arg.modelDocument.uri
+                            except AttributeError:
+                                try:
+                                    objectUrl = self.modelDocument.uri
+                                except AttributeError:
+                                    objectUrl = self.entryLoadingUrl
                         file = UrlUtil.relativeUri(entryUrl, objectUrl)
                         ref = {}
                         if isinstance(arg,ModelObject):
@@ -416,7 +476,8 @@ class ModelXbrl:
                         refs.append(ref)
                 extras["refs"] = refs
             elif argName == "sourceLine":
-                extras["sourceLine"] = argValue
+                if isinstance(argValue, _INT_TYPES):    # must be sortable with int's in logger
+                    extras["sourceLine"] = argValue
             elif argName != "exc_info":
                 if isinstance(argValue, (ModelValue.QName, ModelObject, bool, FileNamedStringIO)):
                     fmtArgs[argName] = str(argValue)

@@ -6,7 +6,8 @@ Created on Jan 30, 2011
 '''
 import sys, os
 
-setup_requires = []
+setup_requires = ['3to2','sphinx']
+install_requires = ['lxml']
 options = {}
 scripts = []
 cxFreezeExecutables = []
@@ -77,22 +78,27 @@ class build_py27(_build_py):
             except Exception as e:
                 print("3to2 error (%s => %s): %s" % (source,target,e))
 
-setup_requires.append('sphinx')
-# Under python2.7, run build before running build_sphinx
-import sphinx.setup_command
-class build_sphinx_py27(sphinx.setup_command.BuildDoc):
-    def run(self):
-        self.run_command('build_py')
-        # Ensure sphinx looks at the "built" arelle libs that
-        # have passed through the 3to2 refactorings
-        # in `build_py27`
-        sys.path.insert(0, os.path.abspath("./build/lib"))
-        sphinx.setup_command.BuildDoc.run(self)
-                
 if sys.version_info[0] < 3:
     setup_requires.append('3to2')
     cmdclass['build_py'] = build_py27
-    cmdclass['build_sphinx'] = build_sphinx_py27
+
+try:
+# Under python2.7, run build before running build_sphinx
+    import sphinx.setup_command
+    class build_sphinx_py27(sphinx.setup_command.BuildDoc):
+        def run(self):
+            self.run_command('build_py')
+            # Ensure sphinx looks at the "built" arelle libs that
+            # have passed through the 3to2 refactorings
+            # in `build_py27`
+            sys.path.insert(0, os.path.abspath("./build/lib"))
+            sphinx.setup_command.BuildDoc.run(self)
+                
+    if sys.version_info[0] < 3:
+        setup_requires.append('3to2')
+        cmdclass['build_sphinx'] = build_sphinx_py27
+except ImportError as e:
+    print("Install Sphinx to generate docs: %s" % e)
 
         
 if sys.platform == 'darwin':
@@ -237,6 +243,7 @@ setup(name='Arelle',
           ]
       },
       setup_requires = setup_requires,
+      install_requires = install_requires,
       options = options,
       executables = cx_FreezeExecutables,
      )

@@ -67,14 +67,6 @@ arelle Package
     :undoc-members:
     :show-inheritance:
 
-:mod:`Formula` Module
----------------------
-
-.. automodule:: arelle.Formula
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
 :mod:`FormulaConsisAsser` Module
 --------------------------------
 

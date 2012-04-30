@@ -6,7 +6,7 @@ Created on Jan 30, 2011
 '''
 import sys, os
 
-setup_requires = ['3to2','sphinx']
+setup_requires = ['3to2','sphinx', 'lxml']
 install_requires = ['lxml']
 options = {}
 scripts = []
